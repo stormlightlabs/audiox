@@ -6,6 +6,7 @@ const test: ViteUserConfig["test"] = {
   environment: "jsdom",
   globals: true,
   setupFiles: ["src/test/setup.ts"],
+  server: { deps: { inline: ["@solidjs/router"] } },
   ui: false,
   watch: false,
 };

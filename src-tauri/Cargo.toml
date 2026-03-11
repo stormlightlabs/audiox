@@ -20,6 +20,49 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 tauri = { version = "2", features = [] }
 tauri-plugin-opener = "2"
+tauri-plugin-shell = "2"
+tauri-plugin-fs = "2"
+tauri-plugin-dialog = "2"
+rusqlite = { version = "0.37.0", features = ["bundled"] }
+uuid = { version = "1.18.1", features = ["v4", "serde"] }
+reqwest = { version = "0.12.24", default-features = false, features = ["json", "rustls-tls"] }
+tokio = { version = "1.48.0", features = ["rt-multi-thread", "macros"] }
+chrono = { version = "0.4.42", features = ["serde"] }
+regex = "1.12.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
+[lints.clippy]
+bool_comparison = "deny"
+duplicate_mod = "deny"
+inconsistent_struct_constructor = "deny"
+invalid_regex = "deny"
+mem_forget = "deny"
+mixed_case_hex_literals = "deny"
+suspicious_arithmetic_impl = "deny"
+uninit_assumed_init = "deny"
+suspicious_else_formatting = "deny"
+suspicious_op_assign_impl = "deny"
+suspicious_to_owned = "deny"
+cmp_owned = "deny"
+cmp_null = "deny"
+manual_map = "deny"
+
+too_many_arguments = "warn"
+cognitive_complexity = "warn"
+large_enum_variant = "warn"
+needless_borrow = "warn"
+needless_pass_by_value = "warn"
+redundant_clone = "warn"
+unnecessary_cast = "warn"
+inefficient_to_string = "warn"
+or_fun_call = "warn"
+unnecessary_to_owned = "warn"
+map_clone = "warn"
+flat_map_identity = "warn"
+needless_collect = "warn"
+vec_init_then_push = "warn"
+
+len_zero = "allow"
+range_plus_one = "allow"
+manual_range_contains = "allow"

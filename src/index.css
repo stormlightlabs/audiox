@@ -13,3 +13,24 @@
   --font-sans: "IBM Plex Sans", "Segoe UI", sans-serif;
   --font-display: "Lora Variable", "Lora", Georgia, serif;
 }
+
+:root {
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  min-height: 100%;
+}
+
+body {
+  margin: 0;
+  font-family: var(--font-sans);
+  color: var(--color-text);
+  background-color: var(--color-surface);
+}

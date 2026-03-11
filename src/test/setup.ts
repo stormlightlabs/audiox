@@ -11,4 +11,6 @@ vi.mock(
   }),
 );
 
+Object.defineProperty(globalThis, "scrollTo", { value: vi.fn(), writable: true });
+
 afterEach(cleanup);
