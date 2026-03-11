@@ -34,6 +34,15 @@ export type PreflightResult = {
   details: PreflightCheckDetail[];
 };
 
+export type SetupStatus = {
+  whisper_model_ready: boolean;
+  ollama_server_ready: boolean;
+  missing_ollama_models: string[];
+  setup_completed: boolean;
+  all_required_ready: boolean;
+  guidance: string[];
+};
+
 export type CheckUiState = { status: CheckDisplayStatus; message: string };
 
 export type ChecklistState = Record<PreflightCheck, CheckUiState>;
@@ -46,7 +55,7 @@ type AppStore = {
   completedChecks: number;
 };
 
-type AppContextValue = { state: AppStore; runPreflight: () => Promise<void> };
+type AppContextValue = { state: AppStore; runPreflight: () => Promise<PreflightResult | null> };
 
 const AppContext = createContext<AppContextValue>();
 
@@ -105,8 +114,10 @@ export function AppProvider(props: ParentProps) {
         checklist,
         completedChecks: countCompletedChecks(checklist),
       });
+      return result;
     } catch (error) {
       setState({ preflightPhase: "failed", preflightError: normalizeError(error) });
+      return null;
     }
   };
 

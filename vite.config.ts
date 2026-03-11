@@ -1,3 +1,4 @@
+import tailwindcss from "@tailwindcss/vite";
 import { defineConfig } from "vite";
 import solid from "vite-plugin-solid";
 import type { ViteUserConfig } from "vitest/config";
@@ -14,7 +15,7 @@ const test: ViteUserConfig["test"] = {
 const host = process.env.TAURI_DEV_HOST;
 
 export default defineConfig(async () => ({
-  plugins: [solid()],
+  plugins: [solid(), tailwindcss()],
   clearScreen: false,
   server: {
     port: 1420,

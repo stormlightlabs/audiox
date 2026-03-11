@@ -7,6 +7,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::ffi::OsStr;
 use std::fs;
+use std::io::Write;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -19,7 +20,11 @@ const REQUIRED_DIRECTORIES: [&str; 6] = ["models", "audio", "video", "subtitles"
 const REQUIRED_OLLAMA_MODELS: [&str; 2] = ["nomic-embed-text", "gemma3:4b"];
 const SCHEMA_VERSION: i64 = 1;
 const PREFLIGHT_EVENT: &str = "preflight://check";
+const SETUP_WHISPER_PROGRESS_EVENT: &str = "setup://whisper-progress";
+const SETUP_OLLAMA_PROGRESS_EVENT: &str = "setup://ollama-progress";
 const OLLAMA_TAGS_URL: &str = "http://localhost:11434/api/tags";
+const OLLAMA_PULL_URL: &str = "http://localhost:11434/api/pull";
+const DEFAULT_WHISPER_MODEL_NAME: &str = "base.en";
 const COMMAND_TIMEOUT_SECONDS: u64 = 8;
 const DOWNLOAD_TIMEOUT_SECONDS: u64 = 120;
 
@@ -71,6 +76,38 @@ struct PreflightResult {
     should_open_setup: bool,
     all_required_passed: bool,
     details: Vec<PreflightCheckDetail>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct SetupStatus {
+    whisper_model_ready: bool,
+    ollama_server_ready: bool,
+    missing_ollama_models: Vec<String>,
+    setup_completed: bool,
+    all_required_ready: bool,
+    guidance: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WhisperDownloadProgress {
+    model_name: String,
+    status: String,
+    message: String,
+    downloaded_bytes: u64,
+    total_bytes: Option<u64>,
+    percent: f64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct OllamaPullProgress {
+    model_name: String,
+    status: String,
+    message: String,
+    completed: u64,
+    total: u64,
+    percent: f64,
 }
 
 impl Default for PreflightResult {
@@ -191,6 +228,37 @@ fn upsert_setting(connection: &Connection, key: &str, value: &str) -> Result<(),
     Ok(())
 }
 
+fn read_setting(connection: &Connection, key: &str) -> Result<Option<String>, String> {
+    connection
+        .query_row("SELECT value FROM settings WHERE key = ?1", params![key], |row| {
+            row.get::<_, String>(0)
+        })
+        .optional()
+        .map_err(|error| format!("failed to read setting '{key}': {error}"))
+}
+
+fn parse_setting_bool(value: Option<String>) -> bool {
+    value
+        .map(|item| item.trim().eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
+fn database_path_from_app_data(app_data_dir: &Path) -> PathBuf {
+    app_data_dir.join("db").join("audiox.db")
+}
+
+fn set_setup_completed(database_path: &Path, completed: bool) -> Result<(), String> {
+    let connection = Connection::open(database_path)
+        .map_err(|error| format!("failed to open database {}: {error}", database_path.display()))?;
+
+    let value = if completed { "true" } else { "false" };
+    upsert_setting(&connection, "setup_completed", value)?;
+    if completed {
+        upsert_setting(&connection, "setup_completed_at", &Utc::now().to_rfc3339())?;
+    }
+    Ok(())
+}
+
 fn initialize_database(database_path: &Path) -> Result<(), String> {
     let connection = Connection::open(database_path)
         .map_err(|error| format!("failed to open database {}: {error}", database_path.display()))?;
@@ -260,7 +328,7 @@ fn initialize_database(database_path: &Path) -> Result<(), String> {
 
 fn bootstrap_at(app_data_dir: &Path) -> Result<AppBootstrapResult, String> {
     let created_directories = ensure_directory_layout(app_data_dir)?;
-    let database_path = app_data_dir.join("db").join("audiox.db");
+    let database_path = database_path_from_app_data(app_data_dir);
     initialize_database(&database_path)?;
 
     Ok(AppBootstrapResult {
@@ -596,10 +664,27 @@ fn model_name_matches(candidate: &str, required: &str) -> bool {
     let candidate = candidate.trim().to_ascii_lowercase();
     let required = required.trim().to_ascii_lowercase();
 
-    candidate == required
-        || candidate.strip_suffix(":latest") == Some(required.as_str())
-        || candidate.starts_with(&format!("{required}:"))
-        || required.starts_with(&format!("{candidate}:"))
+    if candidate == required {
+        return true;
+    }
+
+    let (candidate_family, candidate_tag) = candidate
+        .split_once(':')
+        .map_or((candidate.as_str(), None), |(family, tag)| (family, Some(tag)));
+    let (required_family, required_tag) = required
+        .split_once(':')
+        .map_or((required.as_str(), None), |(family, tag)| (family, Some(tag)));
+
+    if candidate_family != required_family {
+        return false;
+    }
+
+    match (candidate_tag, required_tag) {
+        (None, _) | (_, None) => true,
+        (Some(candidate_tag), Some(required_tag)) => {
+            candidate_tag == required_tag || candidate_tag == "latest" || required_tag == "latest"
+        }
+    }
 }
 
 fn missing_required_ollama_models(models: &[String]) -> Vec<String> {
@@ -634,6 +719,257 @@ async fn fetch_ollama_model_names() -> Result<Vec<String>, String> {
     Ok(parse_ollama_model_names(&tags_payload))
 }
 
+fn validate_whisper_model_name(model_name: &str) -> Result<String, String> {
+    let trimmed = model_name.trim();
+    let valid_pattern =
+        Regex::new(r"^[a-z0-9._-]+$").map_err(|error| format!("failed to compile model validation regex: {error}"))?;
+    if !valid_pattern.is_match(trimmed) {
+        return Err(format!(
+            "invalid whisper model name '{model_name}'; expected letters, numbers, dots, underscores, or dashes"
+        ));
+    }
+    Ok(trimmed.to_string())
+}
+
+fn whisper_model_file_name(model_name: &str) -> String {
+    format!("ggml-{model_name}.bin")
+}
+
+fn whisper_model_download_url(model_name: &str) -> String {
+    format!(
+        "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/{}",
+        whisper_model_file_name(model_name)
+    )
+}
+
+fn calculate_percent(completed: u64, total: u64) -> f64 {
+    if total == 0 {
+        return 0.0;
+    }
+
+    let percent = (completed as f64 / total as f64) * 100.0;
+    percent.clamp(0.0, 100.0)
+}
+
+fn emit_whisper_progress(
+    app: &tauri::AppHandle, model_name: &str, status: &str, message: impl Into<String>, downloaded_bytes: u64,
+    total_bytes: Option<u64>,
+) {
+    let percent = total_bytes
+        .map(|total| calculate_percent(downloaded_bytes, total))
+        .unwrap_or(0.0);
+    let payload = WhisperDownloadProgress {
+        model_name: model_name.to_string(),
+        status: status.to_string(),
+        message: message.into(),
+        downloaded_bytes,
+        total_bytes,
+        percent,
+    };
+    let _ = app.emit(SETUP_WHISPER_PROGRESS_EVENT, payload);
+}
+
+fn emit_ollama_progress(
+    app: &tauri::AppHandle, model_name: &str, status: &str, message: impl Into<String>, completed: u64, total: u64,
+) {
+    let payload = OllamaPullProgress {
+        model_name: model_name.to_string(),
+        status: status.to_string(),
+        message: message.into(),
+        completed,
+        total,
+        percent: calculate_percent(completed, total),
+    };
+    let _ = app.emit(SETUP_OLLAMA_PROGRESS_EVENT, payload);
+}
+
+async fn download_whisper_model_file(
+    app: &tauri::AppHandle, app_data_dir: &Path, model_name: &str,
+) -> Result<PathBuf, String> {
+    let model_file_name = whisper_model_file_name(model_name);
+    let destination = app_data_dir.join("models").join(&model_file_name);
+    if destination.is_file() {
+        emit_whisper_progress(
+            app,
+            model_name,
+            "completed",
+            format!("{model_file_name} already exists."),
+            1,
+            Some(1),
+        );
+        return Ok(destination);
+    }
+
+    let url = whisper_model_download_url(model_name);
+    emit_whisper_progress(
+        app,
+        model_name,
+        "running",
+        format!("Starting download from {url}"),
+        0,
+        None,
+    );
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(DOWNLOAD_TIMEOUT_SECONDS))
+        .build()
+        .map_err(|error| format!("failed to initialize whisper model download client: {error}"))?;
+
+    let mut response = client
+        .get(&url)
+        .send()
+        .await
+        .map_err(|error| format!("failed to download whisper model from {url}: {error}"))?;
+
+    if response.status() != StatusCode::OK {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        return Err(format!(
+            "whisper model download failed with HTTP status {status}: {body}"
+        ));
+    }
+
+    let parent = destination
+        .parent()
+        .ok_or_else(|| format!("destination path {} has no parent directory", destination.display()))?;
+    fs::create_dir_all(parent).map_err(|error| format!("failed to create {}: {error}", parent.display()))?;
+
+    let temporary_path = destination.with_extension("bin.download");
+    let mut file = fs::File::create(&temporary_path).map_err(|error| {
+        format!(
+            "failed to create temporary model file {}: {error}",
+            temporary_path.display()
+        )
+    })?;
+
+    let total_bytes = response.content_length();
+    let mut downloaded_bytes = 0_u64;
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|error| format!("failed while downloading whisper model: {error}"))?
+    {
+        file.write_all(&chunk)
+            .map_err(|error| format!("failed writing model data to {}: {error}", temporary_path.display()))?;
+        downloaded_bytes += u64::try_from(chunk.len()).map_err(|error| format!("download chunk too large: {error}"))?;
+        emit_whisper_progress(
+            app,
+            model_name,
+            "running",
+            format!("Downloading {model_file_name}..."),
+            downloaded_bytes,
+            total_bytes,
+        );
+    }
+
+    file.flush().map_err(|error| {
+        format!(
+            "failed to flush temporary model file {}: {error}",
+            temporary_path.display()
+        )
+    })?;
+
+    if destination.exists() {
+        fs::remove_file(&destination).map_err(|error| {
+            format!(
+                "failed to replace existing whisper model file {}: {error}",
+                destination.display()
+            )
+        })?;
+    }
+    fs::rename(&temporary_path, &destination)
+        .map_err(|error| format!("failed to install whisper model at {}: {error}", destination.display()))?;
+
+    emit_whisper_progress(
+        app,
+        model_name,
+        "completed",
+        format!("Downloaded {model_file_name}."),
+        downloaded_bytes,
+        total_bytes.or(Some(downloaded_bytes)),
+    );
+    Ok(destination)
+}
+
+fn compute_setup_guidance(
+    whisper_model_ready: bool, ollama_server_ready: bool, missing_ollama_models: &[String], ollama_error: Option<&str>,
+) -> Vec<String> {
+    let mut guidance = Vec::new();
+    if !whisper_model_ready {
+        guidance.push(format!(
+            "Download {} into appdata/models to enable transcription.",
+            whisper_model_file_name(DEFAULT_WHISPER_MODEL_NAME)
+        ));
+    }
+    if !ollama_server_ready {
+        let suffix = ollama_error.unwrap_or("Ollama did not respond.");
+        guidance.push(format!(
+            "{suffix} Install Ollama from https://ollama.com and start it with `ollama serve`."
+        ));
+    } else if !missing_ollama_models.is_empty() {
+        guidance.push(format!(
+            "Pull missing Ollama models: {}.",
+            missing_ollama_models.join(", ")
+        ));
+    }
+
+    guidance
+}
+
+async fn check_setup_state(app_data_dir: &Path) -> Result<SetupStatus, String> {
+    ensure_directory_layout(app_data_dir)?;
+    let database_path = database_path_from_app_data(app_data_dir);
+    initialize_database(&database_path)?;
+
+    let whisper_model_ready = whisper_model_present(&app_data_dir.join("models"))?;
+    let (ollama_server_ready, missing_ollama_models, ollama_error) = match fetch_ollama_model_names().await {
+        Ok(models) => {
+            let missing = missing_required_ollama_models(&models);
+            (true, missing, None)
+        }
+        Err(error) => (
+            false,
+            REQUIRED_OLLAMA_MODELS.iter().map(|item| (*item).to_string()).collect(),
+            Some(error),
+        ),
+    };
+
+    let all_required_ready = whisper_model_ready && ollama_server_ready && missing_ollama_models.is_empty();
+    set_setup_completed(&database_path, all_required_ready)?;
+
+    let connection = Connection::open(&database_path)
+        .map_err(|error| format!("failed to open database {}: {error}", database_path.display()))?;
+    let setup_completed = parse_setting_bool(read_setting(&connection, "setup_completed")?);
+
+    Ok(SetupStatus {
+        whisper_model_ready,
+        ollama_server_ready,
+        missing_ollama_models: missing_ollama_models.clone(),
+        setup_completed,
+        all_required_ready,
+        guidance: compute_setup_guidance(
+            whisper_model_ready,
+            ollama_server_ready,
+            &missing_ollama_models,
+            ollama_error.as_deref(),
+        ),
+    })
+}
+
+fn parse_ollama_progress_line(line: &str) -> Result<(String, u64, u64, bool), String> {
+    let payload = serde_json::from_str::<Value>(line)
+        .map_err(|error| format!("invalid Ollama progress payload '{line}': {error}"))?;
+    let status = payload
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("pulling")
+        .to_string();
+    let completed = payload.get("completed").and_then(Value::as_u64).unwrap_or(0);
+    let total = payload.get("total").and_then(Value::as_u64).unwrap_or(0);
+    let done = payload.get("done").and_then(Value::as_bool).unwrap_or(false);
+    Ok((status, completed, total, done))
+}
+
 fn compute_all_required_passed(result: &PreflightResult) -> bool {
     ![
         result.whisper_cli,
@@ -644,6 +980,142 @@ fn compute_all_required_passed(result: &PreflightResult) -> bool {
         result.database,
     ]
     .contains(&CheckStatus::Fail)
+}
+
+#[tauri::command]
+#[allow(clippy::needless_pass_by_value)]
+async fn check_setup(app: tauri::AppHandle) -> Result<SetupStatus, String> {
+    let app_data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| format!("failed to resolve app data directory: {error}"))?;
+
+    let setup = check_setup_state(&app_data_dir).await?;
+    log::info!(
+        "setup status: whisper_ready={}, ollama_server_ready={}, missing_models={}, completed={}",
+        setup.whisper_model_ready,
+        setup.ollama_server_ready,
+        setup.missing_ollama_models.join(","),
+        setup.setup_completed
+    );
+    Ok(setup)
+}
+
+#[tauri::command]
+#[allow(clippy::needless_pass_by_value)]
+async fn download_whisper_model(app: tauri::AppHandle, model: Option<String>) -> Result<String, String> {
+    let app_data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| format!("failed to resolve app data directory: {error}"))?;
+    ensure_directory_layout(&app_data_dir)?;
+
+    let model_name = validate_whisper_model_name(model.as_deref().unwrap_or(DEFAULT_WHISPER_MODEL_NAME))?;
+    let model_path = download_whisper_model_file(&app, &app_data_dir, &model_name).await?;
+    let database_path = database_path_from_app_data(&app_data_dir);
+    initialize_database(&database_path)?;
+    let setup_status = check_setup_state(&app_data_dir).await?;
+    log::info!(
+        "downloaded whisper model {} to {} (all_required_ready={})",
+        model_name,
+        model_path.display(),
+        setup_status.all_required_ready
+    );
+    Ok(model_path.display().to_string())
+}
+
+#[tauri::command]
+#[allow(clippy::needless_pass_by_value)]
+async fn pull_ollama_model(app: tauri::AppHandle, model: String) -> Result<(), String> {
+    let model_name = model.trim().to_string();
+    if model_name.is_empty() {
+        return Err("model_name must not be empty".to_string());
+    }
+
+    emit_ollama_progress(
+        &app,
+        &model_name,
+        "running",
+        format!("Starting pull for {model_name}"),
+        0,
+        0,
+    );
+
+    let client = reqwest::Client::builder()
+        .build()
+        .map_err(|error| format!("failed to initialize Ollama client: {error}"))?;
+    let mut response = client
+        .post(OLLAMA_PULL_URL)
+        .json(&serde_json::json!({ "name": model_name, "stream": true }))
+        .send()
+        .await
+        .map_err(|error| format!("failed to call Ollama pull API at {OLLAMA_PULL_URL}: {error}"))?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        let message = format!("Ollama pull failed with status {status}: {body}");
+        emit_ollama_progress(&app, &model_name, "error", &message, 0, 0);
+        return Err(message);
+    }
+
+    let mut buffer = String::new();
+    let mut received_done = false;
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|error| format!("failed while receiving Ollama pull progress: {error}"))?
+    {
+        buffer.push_str(&String::from_utf8_lossy(&chunk));
+        while let Some(newline_index) = buffer.find('\n') {
+            let line = buffer[..newline_index].trim().to_string();
+            buffer.drain(..=newline_index);
+            if line.is_empty() {
+                continue;
+            }
+
+            let (status, completed, total, done) = parse_ollama_progress_line(&line)?;
+            let progress_status = if done { "completed" } else { "running" };
+            emit_ollama_progress(&app, &model_name, progress_status, status, completed, total);
+            if done {
+                received_done = true;
+            }
+        }
+    }
+
+    let trailing = buffer.trim();
+    if !trailing.is_empty() {
+        let (status, completed, total, done) = parse_ollama_progress_line(trailing)?;
+        let progress_status = if done { "completed" } else { "running" };
+        emit_ollama_progress(&app, &model_name, progress_status, status, completed, total);
+        if done {
+            received_done = true;
+        }
+    }
+
+    if !received_done {
+        emit_ollama_progress(
+            &app,
+            &model_name,
+            "completed",
+            format!("Model {model_name} pull finished."),
+            1,
+            1,
+        );
+    }
+
+    let app_data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| format!("failed to resolve app data directory: {error}"))?;
+    let setup_status = check_setup_state(&app_data_dir).await?;
+    log::info!(
+        "pulled ollama model {} (missing_models_after_pull={})",
+        model_name,
+        setup_status.missing_ollama_models.join(",")
+    );
+
+    Ok(())
 }
 
 #[tauri::command]
@@ -771,7 +1243,7 @@ async fn preflight(app: tauri::AppHandle) -> Result<PreflightResult, String> {
         }
     }
 
-    let database_path = app_data_dir.join("db").join("audiox.db");
+    let database_path = database_path_from_app_data(&app_data_dir);
     match initialize_database(&database_path) {
         Ok(_) => record_preflight_detail(
             &app,
@@ -783,8 +1255,16 @@ async fn preflight(app: tauri::AppHandle) -> Result<PreflightResult, String> {
         Err(error) => record_preflight_detail(&app, &mut result, PreflightCheck::Database, CheckStatus::Fail, error),
     }
 
-    result.should_open_setup = whisper_model_missing || ollama_models_missing;
+    let setup_dependencies_ready = !whisper_model_missing && !ollama_models_missing;
+    result.should_open_setup = !setup_dependencies_ready;
     result.all_required_passed = compute_all_required_passed(&result);
+    set_setup_completed(&database_path, setup_dependencies_ready)?;
+    log::info!(
+        "preflight finished: all_required_passed={}, setup_dependencies_ready={}, should_open_setup={}",
+        result.all_required_passed,
+        setup_dependencies_ready,
+        result.should_open_setup
+    );
 
     Ok(result)
 }
@@ -797,10 +1277,36 @@ pub fn run() {
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
+            let app_data_dir = app.path().app_data_dir().map_err(std::io::Error::other)?;
+            let log_dir = app_data_dir.join("logs");
+            fs::create_dir_all(&log_dir).map_err(std::io::Error::other)?;
+
+            app.handle()
+                .plugin(
+                    tauri_plugin_log::Builder::new()
+                        .level(log::LevelFilter::Info)
+                        .targets([
+                            tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::Stdout),
+                            tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::Folder {
+                                path: log_dir,
+                                file_name: Some("audiox".to_string()),
+                            }),
+                        ])
+                        .build(),
+                )
+                .map_err(std::io::Error::other)?;
+
             bootstrap_from_app(app.handle()).map_err(std::io::Error::other)?;
+            log::info!("Audio X bootstrap complete.");
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![initialize_app, preflight])
+        .invoke_handler(tauri::generate_handler![
+            initialize_app,
+            preflight,
+            check_setup,
+            download_whisper_model,
+            pull_ollama_model
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
@@ -866,6 +1372,7 @@ mod tests {
     fn matching_models_accept_tag_suffix_variants() {
         assert!(model_name_matches("nomic-embed-text:latest", "nomic-embed-text"));
         assert!(model_name_matches("gemma3:4b", "gemma3:4b"));
+        assert!(model_name_matches("gemma3:latest", "gemma3:4b"));
         assert!(!model_name_matches("gemma3:1b", "gemma3:4b"));
     }
 
@@ -903,5 +1410,23 @@ mod tests {
         assert!(!is_valid_sha256(
             "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
         ));
+    }
+
+    #[test]
+    fn setup_completion_state_persists_in_settings_table() {
+        let test_root = temp_dir_path("setup-complete");
+        let bootstrap = bootstrap_at(&test_root).expect("bootstrap should succeed");
+        let database_path = PathBuf::from(bootstrap.database_path);
+
+        set_setup_completed(&database_path, true).expect("set_setup_completed should write true");
+        let connection = Connection::open(&database_path).expect("database should be readable");
+        let value = read_setting(&connection, "setup_completed").expect("setting should be readable");
+        assert_eq!(value.as_deref(), Some("true"));
+
+        set_setup_completed(&database_path, false).expect("set_setup_completed should write false");
+        let value = read_setting(&connection, "setup_completed").expect("setting should be readable");
+        assert_eq!(value.as_deref(), Some("false"));
+
+        fs::remove_dir_all(test_root).expect("test data should be removed");
     }
 }

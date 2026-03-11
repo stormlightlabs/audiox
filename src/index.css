@@ -34,3 +34,7 @@ body {
   color: var(--color-text);
   background-color: var(--color-surface);
 }
+
+button {
+  @apply cursor-pointer;
+}

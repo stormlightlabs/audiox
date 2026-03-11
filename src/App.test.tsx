@@ -49,6 +49,15 @@ const setupPreflight = {
   ),
 };
 
+const setupStatus = {
+  whisper_model_ready: false,
+  ollama_server_ready: false,
+  missing_ollama_models: ["nomic-embed-text", "gemma3:4b"],
+  setup_completed: false,
+  all_required_ready: false,
+  guidance: ["Install Ollama and start it with `ollama serve`."],
+};
+
 describe("Preflight flow", () => {
   beforeEach(() => {
     globalThis.history.replaceState({}, "", "/");
@@ -86,7 +95,15 @@ describe("Preflight flow", () => {
   });
 
   it("auto-transitions to Setup when model checks indicate first-run dependencies are missing", async () => {
-    invokeMock.mockResolvedValue(setupPreflight);
+    invokeMock.mockImplementation((command: string) => {
+      if (command === "preflight") {
+        return Promise.resolve(setupPreflight);
+      }
+      if (command === "check_setup") {
+        return Promise.resolve(setupStatus);
+      }
+      return Promise.resolve();
+    });
     render(() => <App />);
 
     expect(await screen.findByRole("heading", { name: "Audio X" })).toBeInTheDocument();
