@@ -1,26 +1,52 @@
 import { invoke } from "@tauri-apps/api/core";
-import { createContext, onMount, type ParentProps, useContext } from "solid-js";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { createContext, onCleanup, onMount, type ParentProps, useContext } from "solid-js";
 import { createStore } from "solid-js/store";
 
-export type BootPhase = "idle" | "loading" | "ready" | "error";
+export const PREFLIGHT_EVENT = "preflight://check";
+export const PREFLIGHT_CHECK_ORDER = [
+  "whisper_cli",
+  "ffmpeg",
+  "yt_dlp",
+  "whisper_model",
+  "ollama_server",
+  "ollama_models",
+  "database",
+] as const;
 
-export interface AppBootstrapResult {
-  appDataDir: string;
-  databasePath: string;
-  createdDirectories: string[];
-  schemaVersion: number;
-}
+export type PreflightCheck = (typeof PREFLIGHT_CHECK_ORDER)[number];
+export type CheckStatus = "pass" | "fail" | "warn";
+export type PreflightPhase = "idle" | "running" | "ready" | "failed";
+export type CheckDisplayStatus = CheckStatus | "pending";
 
-interface AppStore {
-  bootPhase: BootPhase;
-  bootError: string | null;
-  bootstrap: AppBootstrapResult | null;
-}
+export type PreflightCheckDetail = { check: PreflightCheck; status: CheckStatus; message: string };
 
-interface AppContextValue {
-  state: AppStore;
-  initialize: () => Promise<void>;
-}
+export type PreflightResult = {
+  whisper_cli: CheckStatus;
+  ffmpeg: CheckStatus;
+  yt_dlp: CheckStatus;
+  whisper_model: CheckStatus;
+  ollama_server: CheckStatus;
+  ollama_models: CheckStatus;
+  database: CheckStatus;
+  should_open_setup: boolean;
+  all_required_passed: boolean;
+  details: PreflightCheckDetail[];
+};
+
+export type CheckUiState = { status: CheckDisplayStatus; message: string };
+
+export type ChecklistState = Record<PreflightCheck, CheckUiState>;
+
+type AppStore = {
+  preflightPhase: PreflightPhase;
+  preflightError: string | null;
+  preflightResult: PreflightResult | null;
+  checklist: ChecklistState;
+  completedChecks: number;
+};
+
+type AppContextValue = { state: AppStore; runPreflight: () => Promise<void> };
 
 const AppContext = createContext<AppContextValue>();
 
@@ -31,25 +57,92 @@ function normalizeError(error: unknown): string {
   return String(error);
 }
 
-export function AppProvider(props: ParentProps) {
-  const [state, setState] = createStore<AppStore>({ bootPhase: "idle", bootError: null, bootstrap: null });
+function createInitialChecklist(): ChecklistState {
+  const checklist = {} as ChecklistState;
+  for (const check of PREFLIGHT_CHECK_ORDER) {
+    checklist[check] = { status: "pending", message: "" };
+  }
+  return checklist;
+}
 
-  const initialize = async () => {
-    setState({ bootPhase: "loading", bootError: null });
+function countCompletedChecks(checklist: ChecklistState): number {
+  return Object.values(checklist).filter((item) => item.status !== "pending").length;
+}
+
+function mergePreflightDetails(checklist: ChecklistState, details: PreflightCheckDetail[]): ChecklistState {
+  const merged = { ...checklist };
+  for (const detail of details) {
+    merged[detail.check] = { status: detail.status, message: detail.message };
+  }
+  return merged;
+}
+
+export function AppProvider(props: ParentProps) {
+  const [state, setState] = createStore<AppStore>({
+    preflightPhase: "idle",
+    preflightError: null,
+    preflightResult: null,
+    checklist: createInitialChecklist(),
+    completedChecks: 0,
+  });
+
+  const runPreflight = async () => {
+    setState({
+      preflightPhase: "running",
+      preflightError: null,
+      preflightResult: null,
+      checklist: createInitialChecklist(),
+      completedChecks: 0,
+    });
 
     try {
-      const bootstrap = await invoke<AppBootstrapResult>("initialize_app");
-      setState({ bootstrap, bootPhase: "ready", bootError: null });
+      const result = await invoke<PreflightResult>("preflight");
+      const checklist = mergePreflightDetails(state.checklist, result.details);
+      setState({
+        preflightResult: result,
+        preflightPhase: result.all_required_passed ? "ready" : "failed",
+        preflightError: null,
+        checklist,
+        completedChecks: countCompletedChecks(checklist),
+      });
     } catch (error) {
-      setState({ bootPhase: "error", bootError: normalizeError(error) });
+      setState({ preflightPhase: "failed", preflightError: normalizeError(error) });
     }
   };
 
   onMount(() => {
-    void initialize();
+    let unlisten: UnlistenFn | undefined;
+    let disposed = false;
+
+    void (async () => {
+      try {
+        unlisten = await listen<PreflightCheckDetail>(PREFLIGHT_EVENT, (event) => {
+          const detail = event.payload;
+          setState("checklist", detail.check, { status: detail.status, message: detail.message });
+          setState("completedChecks", countCompletedChecks(state.checklist));
+        });
+        if (disposed && unlisten) {
+          await unlisten();
+          unlisten = undefined;
+        }
+      } catch {
+        // Event channel may be unavailable in plain browser contexts.
+      }
+
+      if (!disposed) {
+        await runPreflight();
+      }
+    })();
+
+    onCleanup(() => {
+      disposed = true;
+      if (unlisten) {
+        void unlisten();
+      }
+    });
   });
 
-  return <AppContext.Provider value={{ state, initialize }}>{props.children}</AppContext.Provider>;
+  return <AppContext.Provider value={{ state, runPreflight }}>{props.children}</AppContext.Provider>;
 }
 
 export function useAppContext() {

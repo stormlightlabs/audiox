@@ -5,10 +5,10 @@ export function SetupView() {
     <ViewScaffold
       eyebrow="Setup"
       title="First-run setup wizard"
-      description="Model downloads and dependency management land in milestone two and three. This placeholder confirms routing and shell integration.">
+      description="Preflight routes here when required models are missing. Download and pull flows are coming soon.">
       <section class="rounded-3xl border border-overlay bg-elevation/85 p-6">
         <p class="text-sm text-subtext">
-          Setup steps will appear here once preflight checks begin tracking missing dependencies.
+          Missing model dependencies were detected. Guided downloads for whisper and Ollama models are coming soon.
         </p>
       </section>
     </ViewScaffold>

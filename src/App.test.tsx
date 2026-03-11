@@ -3,56 +3,95 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
 
-const { invokeMock } = vi.hoisted(() => ({ invokeMock: vi.fn() }));
+const { invokeMock, listenMock } = vi.hoisted(() => ({ invokeMock: vi.fn(), listenMock: vi.fn() }));
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
+vi.mock("@tauri-apps/api/event", () => ({ listen: listenMock }));
 
-const bootstrapPayload = {
-  appDataDir: "/tmp/audiox/appdata",
-  databasePath: "/tmp/audiox/appdata/db/audiox.db",
-  createdDirectories: ["models", "audio", "video", "subtitles", "db"],
-  schemaVersion: 1,
+const successfulPreflight = {
+  whisper_cli: "pass",
+  ffmpeg: "pass",
+  yt_dlp: "warn",
+  whisper_model: "pass",
+  ollama_server: "pass",
+  ollama_models: "pass",
+  database: "pass",
+  should_open_setup: false,
+  all_required_passed: true,
+  details: [
+    { check: "whisper_cli", status: "pass", message: "whisper-cli is available on PATH as 'whisper-cli'." },
+    { check: "ffmpeg", status: "pass", message: "ffmpeg is available on PATH as 'ffmpeg'." },
+    { check: "yt_dlp", status: "warn", message: "yt-dlp missing." },
+    { check: "whisper_model", status: "pass", message: "whisper model files are present." },
+    { check: "ollama_server", status: "pass", message: "Ollama server is reachable." },
+    { check: "ollama_models", status: "pass", message: "Required Ollama models are available." },
+    { check: "database", status: "pass", message: "SQLite database is accessible." },
+  ],
 };
 
-describe("App shell routes", () => {
+const failingPreflight = {
+  ...successfulPreflight,
+  whisper_cli: "fail",
+  all_required_passed: false,
+  details: successfulPreflight.details.map((detail) => detail.check === "whisper_cli"
+    ? { ...detail, status: "fail", message: "whisper-cli is missing. Install 'whisper-cli' on PATH." }
+    : detail
+  ),
+};
+
+const setupPreflight = {
+  ...failingPreflight,
+  whisper_model: "fail",
+  should_open_setup: true,
+  details: failingPreflight.details.map((detail) => detail.check === "whisper_model"
+    ? { ...detail, status: "fail", message: "No whisper model found in appdata/models." }
+    : detail
+  ),
+};
+
+describe("Preflight flow", () => {
   beforeEach(() => {
     globalThis.history.replaceState({}, "", "/");
     invokeMock.mockReset();
-    invokeMock.mockResolvedValue(bootstrapPayload);
+    listenMock.mockReset();
+    listenMock.mockResolvedValue(() => Promise.resolve());
   });
 
-  it("renders splash view by default and initializes app", async () => {
+  it("runs preflight on launch and auto-transitions to Library when checks pass", async () => {
+    invokeMock.mockResolvedValue(successfulPreflight);
     render(() => <App />);
 
-    expect(await screen.findByRole("heading", { name: "Splash and startup checks" })).toBeInTheDocument();
-    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("initialize_app"));
-    expect(await screen.findByText(bootstrapPayload.databasePath)).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Audio X" })).toBeInTheDocument();
+    expect(listenMock).toHaveBeenCalledWith("preflight://check", expect.any(Function));
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("preflight"));
+    await waitFor(() => expect(screen.getByRole("heading", { name: "Document library" })).toBeInTheDocument(), {
+      timeout: 2500,
+    });
   });
 
-  it("navigates between placeholder milestone views", async () => {
+  it("stays on splash with guidance when required checks fail and supports retry", async () => {
     const user = userEvent.setup();
+    invokeMock.mockResolvedValueOnce(failingPreflight).mockResolvedValueOnce(successfulPreflight);
     render(() => <App />);
 
-    await screen.findByRole("heading", { name: "Splash and startup checks" });
+    expect(await screen.findByRole("heading", { name: "Audio X" })).toBeInTheDocument();
+    const guidanceMatches = await screen.findAllByText("whisper-cli is missing. Install 'whisper-cli' on PATH.");
+    expect(guidanceMatches.length).toBeGreaterThan(0);
 
-    await user.click(screen.getByRole("link", { name: "Library" }));
-    expect(await screen.findByRole("heading", { name: "Document library" })).toBeInTheDocument();
-
-    await user.click(screen.getByRole("link", { name: "Settings" }));
-    expect(await screen.findByRole("heading", { name: "System configuration" })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Retry checks" }));
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(screen.getByRole("heading", { name: "Document library" })).toBeInTheDocument(), {
+      timeout: 2500,
+    });
   });
 
-  it("shows bootstrap failures and supports retry", async () => {
-    const user = userEvent.setup();
-    invokeMock.mockRejectedValueOnce(new Error("database unavailable"));
-    invokeMock.mockResolvedValueOnce(bootstrapPayload);
-
+  it("auto-transitions to Setup when model checks indicate first-run dependencies are missing", async () => {
+    invokeMock.mockResolvedValue(setupPreflight);
     render(() => <App />);
 
-    expect(await screen.findByRole("alert")).toHaveTextContent("database unavailable");
-    await user.click(screen.getByRole("button", { name: "Retry initialization" }));
-
-    expect(await screen.findByText(bootstrapPayload.databasePath)).toBeInTheDocument();
-    expect(invokeMock).toHaveBeenCalledTimes(2);
+    expect(await screen.findByRole("heading", { name: "Audio X" })).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole("heading", { name: "First-run setup wizard" })).toBeInTheDocument(), {
+      timeout: 3000,
+    });
   });
 });

@@ -1,105 +1,221 @@
-import { For, Match, Show, Switch } from "solid-js";
-import { type AppBootstrapResult, type BootPhase, useAppContext } from "../state/AppContext";
-import { ViewScaffold } from "./ViewScaffold";
+import { useNavigate } from "@solidjs/router";
+import { createEffect, For, onCleanup, Show } from "solid-js";
+import { Motion } from "solid-motionone";
+import {
+  type CheckDisplayStatus,
+  PREFLIGHT_CHECK_ORDER,
+  type PreflightCheck,
+  useAppContext,
+} from "../state/AppContext";
 
-function PhaseBadge(props: { phase: BootPhase }) {
-  return (
-    <Switch>
-      <Match when={props.phase === "ready"}>
-        <span class="rounded-full bg-accent/20 px-3 py-1 text-xs font-semibold tracking-wide text-accent uppercase">
-          ready
-        </span>
-      </Match>
-      <Match when={props.phase === "loading"}>
-        <span class="rounded-full bg-raised px-3 py-1 text-xs font-semibold tracking-wide text-text uppercase">
-          loading
-        </span>
-      </Match>
-      <Match when={props.phase === "error"}>
-        <span class="rounded-full border border-accent/50 bg-overlay px-3 py-1 text-xs font-semibold tracking-wide text-text uppercase">
-          error
-        </span>
-      </Match>
-      <Match when={true}>
-        <span class="rounded-full bg-raised px-3 py-1 text-xs font-semibold tracking-wide text-subtext uppercase">
-          idle
-        </span>
-      </Match>
-    </Switch>
-  );
-}
+type CheckMeta = { key: PreflightCheck; title: string };
 
-function CreatedDirectories(props: { directories: string[] }) {
-  if (props.directories.length === 0) {
-    return <span>no new directories</span>;
+const checkMeta: CheckMeta[] = [
+  { key: "whisper_cli", title: "Whisper sidecar" },
+  { key: "ffmpeg", title: "FFmpeg sidecar" },
+  { key: "yt_dlp", title: "yt-dlp sidecar (optional)" },
+  { key: "whisper_model", title: "Whisper model file" },
+  { key: "ollama_server", title: "Ollama server" },
+  { key: "ollama_models", title: "Ollama model set" },
+  { key: "database", title: "SQLite database" },
+];
+
+function statusClass(status: CheckDisplayStatus, running: boolean): string {
+  if (running) {
+    return "text-accent";
   }
 
-  return (
-    <ul class="flex flex-wrap gap-2">
-      <For each={props.directories}>
-        {(directory) => (
-          <li class="rounded-full border border-overlay bg-raised px-3 py-1 font-mono text-xs text-text">
-            {directory}
-          </li>
-        )}
-      </For>
-    </ul>
-  );
+  switch (status) {
+    case "pass": {
+      return "text-accent";
+    }
+    case "warn": {
+      return "text-subtext";
+    }
+    case "fail": {
+      return "text-text";
+    }
+    default: {
+      return "text-subtext";
+    }
+  }
 }
 
-function BootstrapDetails(props: { bootstrap: AppBootstrapResult }) {
-  return (
-    <dl class="grid gap-3 text-sm text-subtext">
-      <div class="grid gap-1">
-        <dt class="font-semibold text-text">App data directory</dt>
-        <dd class="font-mono text-xs">{props.bootstrap.appDataDir}</dd>
-      </div>
-      <div class="grid gap-1">
-        <dt class="font-semibold text-text">Database path</dt>
-        <dd class="font-mono text-xs">{props.bootstrap.databasePath}</dd>
-      </div>
-      <div class="grid gap-1">
-        <dt class="font-semibold text-text">Created on first run</dt>
-        <dd>
-          <CreatedDirectories directories={props.bootstrap.createdDirectories} />
-        </dd>
-      </div>
-    </dl>
-  );
+function statusLabel(status: CheckDisplayStatus, running: boolean): string {
+  if (running) {
+    return "running";
+  }
+
+  switch (status) {
+    case "pass": {
+      return "pass";
+    }
+    case "warn": {
+      return "warn";
+    }
+    case "fail": {
+      return "fail";
+    }
+    default: {
+      return "pending";
+    }
+  }
 }
 
-function ErrorAlert(props: { message: string }) {
+function StatusGlyph(props: { status: CheckDisplayStatus; running: boolean }) {
+  if (props.running) {
+    return (
+      <span class="inline-block size-4 rounded-full border-2 border-accent/40 border-t-accent align-middle animate-spin" />
+    );
+  }
+
+  switch (props.status) {
+    case "pass": {
+      return <span class="text-accent">✓</span>;
+    }
+    case "warn": {
+      return <span class="text-subtext">!</span>;
+    }
+    case "fail": {
+      return <span class="text-text">✕</span>;
+    }
+    default: {
+      return <span class="text-subtext">•</span>;
+    }
+  }
+}
+
+function GuidancePanel(props: { messages: string[] }) {
   return (
-    <p role="alert" class="rounded-xl border border-accent/50 bg-accent/10 p-3 text-sm text-text">{props.message}</p>
+    <section class="rounded-xl border border-overlay bg-surface/50 p-4">
+      <p class="text-xs font-semibold tracking-[0.16em] text-subtext uppercase">Guidance</p>
+      <ul class="mt-2 grid gap-2">
+        <For each={props.messages}>{(message) => <li class="text-sm text-subtext">{message}</li>}</For>
+      </ul>
+    </section>
   );
 }
 
 export function SplashView() {
-  const { state, initialize } = useAppContext();
+  const navigate = useNavigate();
+  const { state, runPreflight } = useAppContext();
+
+  const currentRunningIndex = () => {
+    if (state.preflightPhase !== "running") {
+      return -1;
+    }
+    return PREFLIGHT_CHECK_ORDER.findIndex((check) => state.checklist[check].status === "pending");
+  };
+
+  createEffect(() => {
+    const preflight = state.preflightResult;
+    if (!preflight) {
+      return;
+    }
+
+    let timeoutId: ReturnType<typeof setTimeout> | undefined;
+    if (preflight.should_open_setup) {
+      timeoutId = setTimeout(() => {
+        void navigate("/setup", { replace: true });
+      }, 900);
+    } else if (preflight.all_required_passed) {
+      timeoutId = setTimeout(() => {
+        void navigate("/library", { replace: true });
+      }, 700);
+    }
+
+    onCleanup(() => {
+      if (timeoutId) {
+        clearTimeout(timeoutId);
+      }
+    });
+  });
+
+  const guidance = () => {
+    if (!state.preflightResult) {
+      return [];
+    }
+    return state.preflightResult.details.filter((detail) => detail.status === "fail" || detail.status === "warn");
+  };
 
   return (
-    <ViewScaffold
-      eyebrow="Launch"
-      title="Splash and startup checks"
-      description="Audio X initializes local storage and the SQLite schema during app startup. This milestone keeps startup checks intentionally simple.">
-      <section class="grid gap-5 rounded-3xl border border-overlay bg-elevation/85 p-6">
-        <div class="flex items-center justify-between">
-          <span class="text-sm font-semibold tracking-wide text-subtext uppercase">Bootstrap status</span>
-          <PhaseBadge phase={state.bootPhase} />
-        </div>
-        <Show when={state.bootstrap}>{(bootstrap) => <BootstrapDetails bootstrap={bootstrap()} />}</Show>
-        <Show when={state.bootError}>{(bootError) => <ErrorAlert message={bootError()} />}</Show>
-        <div>
+    <section class="w-full max-w-3xl rounded-4xl border border-overlay bg-elevation/85 p-6 shadow-2xl shadow-surface/70 md:p-10">
+      <div class="grid gap-6">
+        <header class="space-y-4 text-center">
+          <div class="mx-auto grid size-16 place-content-center rounded-2xl border border-accent/40 bg-accent/10 text-xl font-bold text-accent">
+            AX
+          </div>
+          <div class="space-y-2">
+            <p class="text-xs tracking-[0.24em] text-subtext uppercase">Startup Preflight</p>
+            <h1 class="font-display text-4xl text-text">Audio X</h1>
+            <p class="text-sm text-subtext">
+              Checking sidecars, models, Ollama, and local database before opening the app.
+            </p>
+          </div>
+        </header>
+
+        <section class="space-y-3 rounded-2xl border border-overlay bg-surface/45 p-4 md:p-5">
+          <For each={checkMeta}>
+            {(item, index) => {
+              const checkState = () => state.checklist[item.key];
+              const running = () => currentRunningIndex() === index();
+
+              return (
+                <Motion.div
+                  initial={{ opacity: 0, y: 8 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  transition={{ duration: 0.2, delay: index() * 0.05 }}
+                  class="rounded-xl border border-overlay/75 bg-elevation/75 px-4 py-3">
+                  <div class="flex items-center justify-between gap-3">
+                    <div class="flex items-center gap-3">
+                      <StatusGlyph status={checkState().status} running={running()} />
+                      <p class="text-sm font-semibold text-text">{item.title}</p>
+                    </div>
+                    <span
+                      class={`text-xs font-semibold tracking-[0.16em] uppercase ${
+                        statusClass(checkState().status, running())
+                      }`}>
+                      {statusLabel(checkState().status, running())}
+                    </span>
+                  </div>
+                  <Show when={checkState().message}>
+                    <p class="mt-2 text-xs leading-relaxed text-subtext">{checkState().message}</p>
+                  </Show>
+                </Motion.div>
+              );
+            }}
+          </For>
+        </section>
+
+        <Show when={state.preflightError}>
+          {(preflightError) => (
+            <p role="alert" class="rounded-xl border border-accent/50 bg-accent/10 p-3 text-sm text-text">
+              {preflightError()}
+            </p>
+          )}
+        </Show>
+
+        <Show when={guidance().length > 0 && state.preflightPhase === "failed"}>
+          <GuidancePanel messages={guidance().map((item) => item.message)} />
+        </Show>
+
+        <div class="flex flex-wrap items-center justify-between gap-3">
+          <p class="text-xs text-subtext">
+            <Show when={state.preflightPhase === "running"} fallback={<span>Preflight finished.</span>}>
+              Running startup checks...
+            </Show>
+          </p>
           <button
             type="button"
-            class="rounded-xl bg-accent px-4 py-2 text-sm font-semibold text-surface transition hover:brightness-110"
+            class="rounded-xl bg-accent px-4 py-2 text-sm font-semibold text-surface transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-60"
             onClick={() => {
-              void initialize();
-            }}>
-            Retry initialization
+              void runPreflight();
+            }}
+            disabled={state.preflightPhase === "running"}>
+            Retry checks
           </button>
         </div>
-      </section>
-    </ViewScaffold>
+      </div>
+    </section>
   );
 }

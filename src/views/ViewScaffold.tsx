@@ -1,10 +1,6 @@
 import type { ParentProps } from "solid-js";
 
-interface ViewScaffoldProps extends ParentProps {
-  eyebrow: string;
-  title: string;
-  description: string;
-}
+type ViewScaffoldProps = ParentProps & { eyebrow: string; title: string; description: string };
 
 export function ViewScaffold(props: ViewScaffoldProps) {
   return (

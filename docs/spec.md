@@ -20,7 +20,7 @@ Audio X is a Tauri 2 desktop app (SolidJS + Tailwind v4 frontend, Rust backend) 
 │  └─────┬─────┘ └─────┬────┘ └───────────┬──────────┘  │
 │        │             │                  │             │
 │  ┌─────▼─────────────▼──────────────────▼───────────┐ │
-│  │                  Sidecars                        │ │
+│  │              Runtime Binaries                    │ │
 │  │  ┌──────────┐  ┌────────┐  ┌──────┐              │ │
 │  │  │whisper   │  │ yt-dlp │  │ffmpeg│              │ │
 │  │  │  -cli    │  │        │  │      │              │ │
@@ -51,6 +51,10 @@ appdata/
   subtitles/
     <uuid>.srt                # generated subtitle files
     <uuid>.vtt
+  bin/
+    whisper-cli/<version>/    # runtime managed whisper executable
+    ffmpeg/<version>/         # runtime managed ffmpeg executable
+    yt-dlp/<version>/         # runtime managed yt-dlp executable
   db/
     audiox.db                 # SQLite database
 ```
@@ -61,7 +65,7 @@ On every launch the app shows a splash screen while running preflight checks. Th
 
 ### Check Sequence
 
-1. **Sidecar binaries** — verify `whisper-cli`, `ffmpeg`, and `yt-dlp` are executable (spawn with `--version` or `-version` and check exit code 0)
+1. **Runtime binaries** — ensure `whisper-cli`, `ffmpeg`, and `yt-dlp` are executable (managed binary path → PATH fallback → runtime download with checksum)
 2. **Whisper model** — check that at least one model file exists in `appdata/models/`
 3. **Ollama server** — `GET http://localhost:11434/api/tags`, timeout 3s
 4. **Ollama models** — parse `/api/tags` response, confirm `nomic-embed-text` and `gemma3:4b` are present
@@ -95,10 +99,10 @@ async fn preflight(app: tauri::AppHandle) -> Result<PreflightResult, String> {
 ```
 
 ```typescript
-interface PreflightResult {
-  whisper_cli: CheckStatus; // sidecar binary
-  ffmpeg: CheckStatus; // sidecar binary
-  yt_dlp: CheckStatus; // sidecar binary (warn if missing, not fail)
+type PreflightResult = {
+  whisper_cli: CheckStatus; // runtime binary
+  ffmpeg: CheckStatus; // runtime binary
+  yt_dlp: CheckStatus; // runtime binary (warn if missing, not fail)
   whisper_model: CheckStatus; // model file
   ollama_server: CheckStatus; // server reachable
   ollama_models: CheckStatus; // required models present
@@ -111,7 +115,12 @@ type CheckStatus = "pass" | "fail" | "warn";
 
 ### Distribution Strategy
 
-Bundle the pre-compiled `whisper-cli` binary as a Tauri **sidecar**. The binary must be named with the platform target triple suffix (e.g., `whisper-cli-aarch64-apple-darwin`).
+Manage `whisper-cli` as a **runtime binary** in `appDataDir/bin/whisper-cli/<version>/`.
+
+- On preflight, if missing locally, attempt download from configured URL + SHA256
+- Verify checksum before install
+- Mark executable (`chmod +x` on macOS/Linux)
+- Fall back to `whisper-cli` on system `PATH` if runtime binary is unavailable
 
 ### Model Management
 
@@ -122,12 +131,12 @@ Bundle the pre-compiled `whisper-cli` binary as a Tauri **sidecar**. The binary 
 
 ### Transcription Pipeline
 
-**Input requirements:** whisper.cpp requires 16-bit PCM WAV, 16kHz, mono. The ffmpeg sidecar handles all format conversion (see §4).
+**Input requirements:** whisper.cpp requires 16-bit PCM WAV, 16kHz, mono. The ffmpeg runtime binary handles all format conversion (see §4).
 
 **Rust command flow:**
 
-1. Convert input audio to required format via ffmpeg sidecar (see §4)
-2. Spawn whisper-cli sidecar:
+1. Convert input audio to required format via ffmpeg runtime binary (see §4)
+2. Spawn whisper-cli runtime binary:
 
    ```sh
    whisper-cli -m <model_path> -f <audio_path> -oj -l auto -t 4 -pp
@@ -174,14 +183,14 @@ Flow:
 1. `navigator.mediaDevices.getUserMedia({ audio: true })` → MediaStream
 2. `MediaRecorder` with `audio/webm;codecs=opus` (or wav via AudioWorklet)
 3. On stop, send blob to Rust backend via IPC
-4. Rust passes to ffmpeg sidecar for conversion to 16kHz mono WAV, saves to `appdata/audio/`
+4. Rust passes to ffmpeg runtime binary for conversion to 16kHz mono WAV, saves to `appdata/audio/`
 5. Trigger transcription pipeline
 
 ## 3. yt-dlp Integration
 
 ### Distribution Strategy
 
-Bundle the `yt-dlp` standalone binary (~21 MB) as a Tauri sidecar. yt-dlp is distributed as a self-contained executable for all platforms — no Python required.
+Manage `yt-dlp` as a runtime binary in `appDataDir/bin/yt-dlp/<version>/` with checksum verification. If unavailable, fall back to `yt-dlp` on system `PATH`.
 
 | Platform        | Binary                                             | Size   |
 | --------------- | -------------------------------------------------- | ------ |
@@ -189,7 +198,7 @@ Bundle the `yt-dlp` standalone binary (~21 MB) as a Tauri sidecar. yt-dlp is dis
 | Linux x86_64    | `yt-dlp_linux` → `yt-dlp-x86_64-unknown-linux-gnu` | ~21 MB |
 | Windows x64     | `yt-dlp.exe` → `yt-dlp-x86_64-pc-windows-msvc.exe` | ~21 MB |
 
-yt-dlp requires ffmpeg on the system PATH or bundled alongside for audio extraction/conversion. Since we already bundle ffmpeg as a sidecar, set the `--ffmpeg-location` flag to point at our bundled binary.
+yt-dlp requires ffmpeg for audio extraction/conversion. The app points `--ffmpeg-location` to the managed ffmpeg binary when present, otherwise uses system `PATH`.
 
 ### URL Import Flow
 
@@ -249,7 +258,9 @@ yt-dlp supports 1000+ sites (YouTube, Vimeo, SoundCloud, Bandcamp, Twitter/X, Re
 
 ### Distribution Strategy
 
-Bundle a static ffmpeg binary as a Tauri sidecar. Static builds are available for all platforms:
+Manage ffmpeg as a runtime binary in `appDataDir/bin/ffmpeg/<version>/` with checksum verification. If unavailable, fall back to `ffmpeg` on system `PATH`.
+
+Suggested static build sources by platform:
 
 | Platform    | Source                                                                                                                 | Approx. Size |
 | ----------- | ---------------------------------------------------------------------------------------------------------------------- | ------------ |
@@ -475,7 +486,7 @@ Search is cosine similarity over chunk embeddings:
 Use SolidJS `createStore` for app-wide state via Context:
 
 ```typescript
-interface AppState {
+type AppState = {
   documents: DocumentMeta[]; // library listing (no full transcript)
   activeDocument: Document | null; // currently viewed document
   recording: {
@@ -515,7 +526,7 @@ Exposed Rust commands called from the frontend via `invoke()`:
 | `pull_ollama_model`      | `model_name`        | stream events     | Pull Ollama model with progress               |
 | `save_audio`             | `audio_bytes`       | `audio_path`      | Save recorded audio to appdata                |
 | `convert_audio`          | `input_path`        | `wav_path`        | ffmpeg convert to 16kHz mono WAV              |
-| `transcribe`             | `audio_path, model` | `Transcript`      | Run whisper-cli sidecar                       |
+| `transcribe`             | `audio_path, model` | `Transcript`      | Run whisper-cli runtime binary                |
 | `generate_subtitles`     | `audio_path, model` | `SubtitlePaths`   | Run whisper-cli with -osrt -ovtt              |
 | `burn_subtitles`         | `video, srt`        | `output_path`     | ffmpeg subtitle burn-in                       |
 | `fetch_url_meta`         | `url`               | `YtDlpMeta`       | yt-dlp --dump-json (no download)              |
@@ -527,54 +538,39 @@ Exposed Rust commands called from the frontend via `invoke()`:
 | `search`                 | `query`             | `SearchResult[]`  | Semantic search over embeddings               |
 | `update_document`        | `id, fields`        | `Document`        | Edit title, tags, etc.                        |
 
-### Sidecar Configuration
+### Runtime Binary Configuration
 
-**tauri.conf.json:**
-
-```json
-{
-  "bundle": {
-    "externalBin": [
-      "binaries/whisper-cli",
-      "binaries/ffmpeg",
-      "binaries/yt-dlp"
-    ]
-  }
-}
-```
-
-**Capability permissions (`src-tauri/capabilities/default.json`):**
-
-```json
-{
-  "identifier": "shell:allow-spawn",
-  "allow": [
-    { "name": "binaries/whisper-cli", "sidecar": true, "args": true },
-    { "name": "binaries/ffmpeg", "sidecar": true, "args": true },
-    { "name": "binaries/yt-dlp", "sidecar": true, "args": true }
-  ]
-}
-```
-
-**Binary naming per platform:**
+Runtime binaries are stored under:
 
 ```text
-src-tauri/binaries/
-  whisper-cli-aarch64-apple-darwin
-  whisper-cli-x86_64-apple-darwin
-  ffmpeg-aarch64-apple-darwin
-  ffmpeg-x86_64-apple-darwin
-  yt-dlp-aarch64-apple-darwin
-  yt-dlp-x86_64-apple-darwin
+appdata/bin/
+  whisper-cli/<version>/whisper-cli(.exe)
+  ffmpeg/<version>/ffmpeg(.exe)
+  yt-dlp/<version>/yt-dlp(.exe)
+```
+
+Preflight install strategy:
+
+1. Check managed binary path under `appdata/bin/`
+2. If missing, check system `PATH`
+3. If still missing, attempt download using configured URL + SHA256
+4. Verify SHA256, install atomically, and mark executable
+
+Runtime download env vars (per tool):
+
+```text
+AUDIOX_WHISPER_URL / AUDIOX_WHISPER_SHA256
+AUDIOX_FFMPEG_URL / AUDIOX_FFMPEG_SHA256
+AUDIOX_YTDLP_URL / AUDIOX_YTDLP_SHA256
 ```
 
 ### Tauri Plugins Required
 
-| Plugin      | Crate                 | JS Package                  | Purpose                      |
-| ----------- | --------------------- | --------------------------- | ---------------------------- |
-| Shell       | `tauri-plugin-shell`  | `@tauri-apps/plugin-shell`  | Run all sidecar binaries     |
-| File System | `tauri-plugin-fs`     | `@tauri-apps/plugin-fs`     | Read/write appdata files     |
-| Dialog      | `tauri-plugin-dialog` | `@tauri-apps/plugin-dialog` | File picker for audio import |
+| Plugin      | Crate                 | JS Package                  | Purpose                       |
+| ----------- | --------------------- | --------------------------- | ----------------------------- |
+| Shell       | `tauri-plugin-shell`  | `@tauri-apps/plugin-shell`  | Execute external tools safely |
+| File System | `tauri-plugin-fs`     | `@tauri-apps/plugin-fs`     | Read/write appdata files      |
+| Dialog      | `tauri-plugin-dialog` | `@tauri-apps/plugin-dialog` | File picker for audio import  |
 
 ### Rust Dependencies (additional)
 

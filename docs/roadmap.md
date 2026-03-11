@@ -2,6 +2,14 @@
 
 Each milestone produces a usable app. Later milestones build on earlier ones.
 
+## Overview
+
+- Part 1 (MVP): M1 - M4
+- Part 2: M5 - M7
+- Part 3: M8
+- Part 4: M9 - M10
+- Part 5: M11 - M12
+
 ## M1: Project Scaffold & Shell
 
 **Goal:** Tauri + SolidJS app boots, Tailwind styling works, basic navigation between views.
@@ -12,7 +20,7 @@ Each milestone produces a usable app. Later milestones build on earlier ones.
 - App-wide SolidJS store + context provider
 - Router/view switching (Splash, Setup, Record, Import, Library, Document, Settings (`@solidjs/router`))
 - SQLite database initialization on startup (create tables if not exist)
-- AppData directory structure creation on first launch (`models/`, `audio/`, `video/`, `subtitles/`, `db/`)
+- AppData directory structure creation on first launch (`models/`, `audio/`, `video/`, `subtitles/`, `bin/`, `db/`)
 - Basic layout shell: sidebar/nav + content area with Tailwind
 
 **Usable state:** App launches, navigates between empty views, database is ready.
@@ -22,8 +30,10 @@ Each milestone produces a usable app. Later milestones build on earlier ones.
 **Goal:** Every launch validates runtime dependencies before showing the main UI.
 
 - Splash view as the app entry point (logo, animated checklist via solid-motionone)
-- Bundle sidecar binaries: `whisper-cli`, `ffmpeg`, `yt-dlp` (platform target-triple naming)
-- Preflight command checks each sidecar binary (`--version`/`-version`, exit code 0)
+- Add runtime binary manager in Rust (`appdata/bin/<tool>/<version>/`)
+- Preflight checks each binary by running `--version` / `-version`
+- If missing locally, attempt runtime download (URL + SHA256 config), then verify and install
+- If runtime download is not configured, fall back to system PATH check
 - Check whisper model file exists in `appdata/models/`
 - Check Ollama server reachable (`GET /api/tags`, 3s timeout)
 - Check required Ollama models present (`nomic-embed-text`, `gemma3:4b`)
@@ -54,14 +64,14 @@ Each milestone produces a usable app. Later milestones build on earlier ones.
 
 - File picker dialog (via `tauri-plugin-dialog`) for audio file selection (mp3, m4a, wav, flac, ogg, opus, webm)
 - Copy imported file to `appdata/audio/`
-- ffmpeg sidecar converts any format to 16kHz mono WAV:
+- ffmpeg runtime binary converts any format to 16kHz mono WAV:
 
   ```sh
   ffmpeg -i <input> -ar 16000 -ac 1 -c:a pcm_s16le -y <output.wav>
   ```
 
 - Parse ffmpeg progress via `-progress pipe:1` for conversion status
-- Spawn `whisper-cli` sidecar for transcription with progress streaming
+- Spawn `whisper-cli` runtime binary for transcription with progress streaming
 - Generate subtitles alongside transcript (`-osrt -ovtt` flags)
 - Parse whisper JSON output into timestamped segments
 - Display raw transcript in a Document view with segment timestamps
