@@ -93,7 +93,7 @@ describe("Preflight flow", () => {
       timeout: 2500,
     });
 
-    await user.click(screen.getByRole("link", { name: "Splash" }));
+    await user.click(screen.getByRole("link", { name: "Splash screen" }));
     expect(await screen.findByText("Startup Preflight")).toBeInTheDocument();
 
     await new Promise((resolve) => {

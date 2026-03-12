@@ -4,7 +4,7 @@ import { formatDate, formatDuration } from "$/format-utils";
 import { A } from "@solidjs/router";
 import { invoke } from "@tauri-apps/api/core";
 import { createEffect, createMemo, createSignal, For, onCleanup, onMount, Show } from "solid-js";
-import { Motion, Presence } from "solid-motionone";
+import { Motion } from "solid-motionone";
 import { ViewScaffold } from "./ViewScaffold";
 
 type DocumentSummary = {
@@ -341,42 +341,39 @@ export function LibraryView() {
               </p>
             </Show>
 
-            <Presence>
-              <For each={searchResults()}>
-                {(result, index) => (
-                  <Motion.article
-                    initial={{ opacity: 0, y: 14 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    exit={{ opacity: 0, y: -10 }}
-                    transition={{ duration: 0.22, delay: index() * 0.02 }}
-                    class="rounded-2xl border border-overlay bg-elevation/70 p-4">
-                    <div class="flex flex-wrap items-center justify-between gap-2">
-                      <A
-                        href={`/document/${result.documentId}${
-                          result.segmentStartMs !== null
-                            ? `?segment=${result.segmentStartMs}&q=${encodeURIComponent(activeSearchQuery())}`
-                            : `?q=${encodeURIComponent(activeSearchQuery())}`
-                        }`}
-                        class="text-sm font-semibold text-text transition hover:text-accent">
-                        {result.documentTitle}
-                      </A>
-                      <span class="rounded-full border border-overlay px-2 py-0.5 text-[11px] font-semibold text-subtext">
-                        score {result.similarity.toFixed(3)}
-                      </span>
-                    </div>
-                    <p class="mt-2 text-sm leading-relaxed text-text">
-                      {renderHighlightedChunk(result.chunkContent, activeSearchQuery())}
-                    </p>
-                    <div class="mt-2 flex flex-wrap items-center gap-2 text-[11px] text-subtext">
-                      <span>Chunk #{result.chunkIndex + 1}</span>
-                      <Show when={result.segmentStartMs !== null}>
-                        <span>Jump to {Math.max(0, Math.floor((result.segmentStartMs ?? 0) / 1000))}s</span>
-                      </Show>
-                    </div>
-                  </Motion.article>
-                )}
-              </For>
-            </Presence>
+            <For each={searchResults()}>
+              {(result, index) => (
+                <Motion.article
+                  initial={{ opacity: 0, y: 14 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  transition={{ duration: 0.22, delay: index() * 0.02 }}
+                  class="rounded-2xl border border-overlay bg-elevation/70 p-4">
+                  <div class="flex flex-wrap items-center justify-between gap-2">
+                    <A
+                      href={`/document/${result.documentId}${
+                        result.segmentStartMs !== null
+                          ? `?segment=${result.segmentStartMs}&q=${encodeURIComponent(activeSearchQuery())}`
+                          : `?q=${encodeURIComponent(activeSearchQuery())}`
+                      }`}
+                      class="text-sm font-semibold text-text transition hover:text-accent">
+                      {result.documentTitle}
+                    </A>
+                    <span class="rounded-full border border-overlay px-2 py-0.5 text-[11px] font-semibold text-subtext">
+                      score {result.similarity.toFixed(3)}
+                    </span>
+                  </div>
+                  <p class="mt-2 text-sm leading-relaxed text-text">
+                    {renderHighlightedChunk(result.chunkContent, activeSearchQuery())}
+                  </p>
+                  <div class="mt-2 flex flex-wrap items-center gap-2 text-[11px] text-subtext">
+                    <span>Chunk #{result.chunkIndex + 1}</span>
+                    <Show when={result.segmentStartMs !== null}>
+                      <span>Jump to {Math.max(0, Math.floor((result.segmentStartMs ?? 0) / 1000))}s</span>
+                    </Show>
+                  </div>
+                </Motion.article>
+              )}
+            </For>
           </section>
         </Show>
 
@@ -399,51 +396,48 @@ export function LibraryView() {
         </Show>
 
         <Show when={!isLoading()}>
-          <Presence>
-            <For each={documents()}>
-              {(document, index) => (
-                <Motion.article
-                  initial={{ opacity: 0, y: 16 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  exit={{ opacity: 0, y: -12 }}
-                  transition={{ duration: 0.22, delay: index() * 0.02 }}
-                  class="rounded-2xl border border-overlay bg-surface/35 p-4">
-                  <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-                    <A href={`/document/${document.id}`} class="block flex-1 transition hover:opacity-95">
-                      <p class="text-base font-semibold text-text">{document.title || "Untitled transcript"}</p>
-                      <p class="mt-1 text-xs text-subtext">{document.summary || "Raw transcript only."}</p>
+          <For each={documents()}>
+            {(document, index) => (
+              <Motion.article
+                initial={{ opacity: 0, y: 16 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ duration: 0.22, delay: index() * 0.02 }}
+                class="rounded-2xl border border-overlay bg-surface/35 p-4">
+                <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                  <A href={`/document/${document.id}`} class="block flex-1 transition hover:opacity-95">
+                    <p class="text-base font-semibold text-text">{document.title || "Untitled transcript"}</p>
+                    <p class="mt-1 text-xs text-subtext">{document.summary || "Raw transcript only."}</p>
 
-                      <div class="mt-2 flex flex-wrap items-center gap-2 text-[11px] text-subtext">
-                        <span>{formatDuration(document.durationSeconds)}</span>
-                        <span>{formatDate(document.createdAt)}</span>
+                    <div class="mt-2 flex flex-wrap items-center gap-2 text-[11px] text-subtext">
+                      <span>{formatDuration(document.durationSeconds)}</span>
+                      <span>{formatDate(document.createdAt)}</span>
+                    </div>
+
+                    <Show when={document.tags.length > 0}>
+                      <div class="mt-2 flex flex-wrap gap-1.5">
+                        <For each={document.tags}>
+                          {(tag) => (
+                            <span class="rounded-full border border-overlay px-2 py-0.5 text-[10px] font-semibold text-subtext">
+                              {tag}
+                            </span>
+                          )}
+                        </For>
                       </div>
+                    </Show>
+                  </A>
 
-                      <Show when={document.tags.length > 0}>
-                        <div class="mt-2 flex flex-wrap gap-1.5">
-                          <For each={document.tags}>
-                            {(tag) => (
-                              <span class="rounded-full border border-overlay px-2 py-0.5 text-[10px] font-semibold text-subtext">
-                                {tag}
-                              </span>
-                            )}
-                          </For>
-                        </div>
-                      </Show>
-                    </A>
-
-                    <button
-                      type="button"
-                      class="rounded-xl border border-red-400/60 bg-red-500/10 px-3 py-1.5 text-xs font-semibold text-red-200 transition hover:border-red-300"
-                      onClick={() => {
-                        void removeDocument(document.id, document.title || "Untitled transcript");
-                      }}>
-                      Delete
-                    </button>
-                  </div>
-                </Motion.article>
-              )}
-            </For>
-          </Presence>
+                  <button
+                    type="button"
+                    class="rounded-xl border border-red-400/60 bg-red-500/10 px-3 py-1.5 text-xs font-semibold text-red-200 transition hover:border-red-300"
+                    onClick={() => {
+                      void removeDocument(document.id, document.title || "Untitled transcript");
+                    }}>
+                    Delete
+                  </button>
+                </div>
+              </Motion.article>
+            )}
+          </For>
         </Show>
       </section>
     </ViewScaffold>

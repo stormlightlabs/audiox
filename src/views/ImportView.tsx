@@ -182,7 +182,7 @@ export function ImportView() {
           {(progress) => (
             <article class="space-y-2 rounded-2xl border border-overlay bg-surface/45 p-4">
               <div class="flex items-center justify-between gap-3">
-                <p class="text-sm font-semibold text-text">metadata generation</p>
+                <p class="text-sm font-semibold text-text">gemma enrichment + embeddings</p>
                 <span class="text-xs font-semibold tracking-[0.16em] text-subtext uppercase">{progress().status}</span>
               </div>
               <p class="text-xs text-subtext">{progress().message}</p>

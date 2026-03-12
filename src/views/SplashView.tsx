@@ -1,6 +1,7 @@
 import { useNavigate } from "@solidjs/router";
 import { createEffect, For, onCleanup, Show } from "solid-js";
 import { Motion } from "solid-motionone";
+import { Accordion } from "../components/Accordion";
 import {
   type CheckDisplayStatus,
   PREFLIGHT_CHECK_ORDER,
@@ -159,7 +160,14 @@ export function SplashView() {
           </div>
         </header>
 
-        <section class="space-y-3 rounded-2xl border border-overlay bg-surface/45 p-4 md:p-5">
+        <Accordion
+          id="preflight-checklist"
+          title="Preflight checklist"
+          summary={`${state.completedChecks}/${PREFLIGHT_CHECK_ORDER.length} checks complete`}
+          defaultOpen
+          class="rounded-2xl border border-overlay bg-surface/45"
+          headerClass="px-4 py-3 md:px-5"
+          contentClass="space-y-3 px-4 pb-4 md:px-5 md:pb-5">
           <For each={checkMeta}>
             {(item, index) => {
               const checkState = () => state.checklist[item.key];
@@ -190,7 +198,7 @@ export function SplashView() {
               );
             }}
           </For>
-        </section>
+        </Accordion>
 
         <Show when={state.preflightError}>
           {(preflightError) => (

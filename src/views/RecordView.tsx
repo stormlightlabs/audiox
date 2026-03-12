@@ -6,7 +6,7 @@ import { useNavigate } from "@solidjs/router";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { appDataDir, join } from "@tauri-apps/api/path";
-import { createSignal, onCleanup, onMount } from "solid-js";
+import { createSignal, onCleanup, onMount, Show } from "solid-js";
 import { Motion } from "solid-motionone";
 import {
   getStatus,
@@ -473,12 +473,6 @@ export function RecordView() {
     );
   }
 
-  const conversion = conversionProgress();
-  const transcription = transcriptionProgress();
-  const metadata = metadataProgress();
-  const document = lastDocument();
-  const errorMessage = error();
-
   return (
     <ViewScaffold
       eyebrow="Capture"
@@ -506,41 +500,51 @@ export function RecordView() {
 
         {phase() === "processing" && (
           <p class="rounded-xl border border-overlay bg-surface/35 p-3 text-sm text-subtext">
-            Processing recording with ffmpeg, whisper, and metadata generation.
+            Processing recording with ffmpeg, whisper, and Gemma enrichment.
           </p>
         )}
-        {conversion && (
-          <PipelineProgressCard
-            title="ffmpeg conversion"
-            status={conversion.status}
-            message={conversion.message}
-            percent={conversion.percent} />
-        )}
-        {transcription && (
-          <PipelineProgressCard
-            title="whisper transcription"
-            status={transcription.status}
-            message={transcription.message}
-            percent={transcription.percent} />
-        )}
-        {metadata && (
-          <PipelineProgressCard
-            title="metadata generation"
-            status={metadata.status}
-            message={metadata.message}
-            percent={metadata.percent} />
-        )}
-        {document && (
-          <article class="rounded-2xl border border-overlay bg-surface/35 p-4">
-            <p class="text-sm font-semibold text-text">{document.title} saved.</p>
-            <p class="mt-1 text-xs text-subtext">{document.segments.length} timestamped segments captured.</p>
-          </article>
-        )}
-        {errorMessage && (
-          <p role="alert" class="rounded-xl border border-accent/50 bg-accent/10 p-3 text-sm text-text">
-            {errorMessage}
-          </p>
-        )}
+        <Show when={conversionProgress()}>
+          {(progress) => (
+            <PipelineProgressCard
+              title="ffmpeg conversion"
+              status={progress().status}
+              message={progress().message}
+              percent={progress().percent} />
+          )}
+        </Show>
+        <Show when={transcriptionProgress()}>
+          {(progress) => (
+            <PipelineProgressCard
+              title="whisper transcription"
+              status={progress().status}
+              message={progress().message}
+              percent={progress().percent} />
+          )}
+        </Show>
+        <Show when={metadataProgress()}>
+          {(progress) => (
+            <PipelineProgressCard
+              title="gemma enrichment + embeddings"
+              status={progress().status}
+              message={progress().message}
+              percent={progress().percent} />
+          )}
+        </Show>
+        <Show when={lastDocument()}>
+          {(document) => (
+            <article class="rounded-2xl border border-overlay bg-surface/35 p-4">
+              <p class="text-sm font-semibold text-text">{document().title} saved.</p>
+              <p class="mt-1 text-xs text-subtext">{document().segments.length} timestamped segments captured.</p>
+            </article>
+          )}
+        </Show>
+        <Show when={error()}>
+          {(message) => (
+            <p role="alert" class="rounded-xl border border-accent/50 bg-accent/10 p-3 text-sm text-text">
+              {message()}
+            </p>
+          )}
+        </Show>
       </section>
     </ViewScaffold>
   );

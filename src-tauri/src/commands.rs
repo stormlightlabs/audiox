@@ -241,24 +241,29 @@ async fn generate_metadata_once(
 
 async fn generate_metadata_with_retry(
     app: &tauri::AppHandle, client: &reqwest::Client, transcript: &str,
-) -> Result<GeneratedMetadata, String> {
+) -> Result<(GeneratedMetadata, String), String> {
     let mut last_error = "metadata generation did not run".to_string();
 
     for attempt in 1..=MaxAttempts::Metadata.value() {
+        let generate_model = resolve_generate_model_name().await;
         emit_metadata_progress(
             app,
             "running",
             format!(
-                "Generating title, summary, and tags with Ollama (attempt {attempt}/{})...",
+                "Generating title, summary, and tags with {generate_model} (attempt {attempt}/{})...",
                 MaxAttempts::Metadata.value()
             ),
-            20.0 + ((attempt.saturating_sub(1) as f64) * 20.0),
+            12.0 + ((attempt.saturating_sub(1) as f64) * 12.0),
         );
-        let generate_model = resolve_generate_model_name().await;
         match generate_metadata_once(client, transcript, &generate_model).await {
             Ok(generated) => {
-                emit_metadata_progress(app, "completed", "Metadata generation complete.", 100.0);
-                return Ok(generated);
+                emit_metadata_progress(
+                    app,
+                    "running",
+                    format!("Metadata generated with {generate_model}. Preparing embeddings..."),
+                    62.0,
+                );
+                return Ok((generated, generate_model));
             }
             Err(error) => {
                 last_error = error;
@@ -517,11 +522,13 @@ fn find_matching_segment_for_chunk(
 async fn process_document_ai(
     app: &tauri::AppHandle, transcript: &str, segments: &[models::TranscriptSegment], fallback_title: &str,
 ) -> Result<(String, Option<String>, Vec<String>, Vec<models::EmbeddedChunk>), String> {
+    emit_metadata_progress(app, "running", "Starting Gemma transcript enrichment...", 5.0);
+
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(120))
         .build()
         .map_err(|error| format!("failed to initialize Ollama HTTP client: {error}"))?;
-    let generated = generate_metadata_with_retry(app, &client, transcript).await?;
+    let (generated, generate_model) = generate_metadata_with_retry(app, &client, transcript).await?;
 
     let title = generated
         .title
@@ -530,11 +537,21 @@ async fn process_document_ai(
     let summary = generated.summary.or_else(|| fallback_summary(transcript));
     let tags = generated.tags;
 
+    emit_metadata_progress(app, "running", "Chunking transcript for embedding generation...", 72.0);
     let chunks = parsers::build_embedding_chunks(segments, transcript, models::EMBEDDING_CHUNK_TARGET_WORDS);
     if chunks.is_empty() {
         return Err("could not create transcript chunks for embeddings".to_string());
     }
 
+    emit_metadata_progress(
+        app,
+        "running",
+        format!(
+            "Generating semantic embeddings with {}...",
+            models::OllamaModel::Embed.as_str()
+        ),
+        82.0,
+    );
     let embed_response = client
         .post(models::OllamaUrl::Embed.as_str())
         .json(&serde_json::json!({
@@ -571,6 +588,13 @@ async fn process_document_ai(
         .enumerate()
         .map(|(index, (content, embedding))| models::EmbeddedChunk { chunk_index: index as i64, content, embedding })
         .collect::<Vec<_>>();
+
+    emit_metadata_progress(
+        app,
+        "completed",
+        format!("Gemma enrichment complete with {generate_model}. Embeddings ready."),
+        100.0,
+    );
 
     Ok((title, summary, tags, embedded_chunks))
 }
