@@ -33,14 +33,15 @@ const failingPreflight = {
   ...successfulPreflight,
   whisper_cli: "fail",
   all_required_passed: false,
-  details: successfulPreflight.details.map((detail) => detail.check === "whisper_cli"
-    ? {
-      ...detail,
-      status: "fail",
-      message:
-        "whisper-cli is unavailable. Reinstall Audio X to restore bundled dependencies. For local development, run `bash setup.sh` and ensure 'whisper-cli' is installed on PATH.",
-    }
-    : detail
+  details: successfulPreflight.details.map((detail) =>
+    detail.check === "whisper_cli"
+      ? {
+        ...detail,
+        status: "fail",
+        message:
+          "whisper-cli is unavailable. Reinstall Audio X to restore bundled dependencies. For local development, run `bash setup.sh` and ensure 'whisper-cli' is installed on PATH.",
+      }
+      : detail
   ),
 };
 

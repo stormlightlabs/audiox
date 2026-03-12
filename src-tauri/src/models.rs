@@ -1,5 +1,7 @@
 //! Ollama and Whisper.cpp module
 
+use std::str::FromStr;
+
 use serde::Serialize;
 
 pub const REQUIRED_DIRECTORIES: [&str; 6] = ["models", "audio", "video", "subtitles", "db", "bin"];
@@ -18,8 +20,11 @@ pub const OLLAMA_GENERATE_MODEL: &str = "gemma3:4b";
 pub const OLLAMA_EMBED_MODEL: &str = "nomic-embed-text";
 pub const DEFAULT_WHISPER_MODEL_NAME: &str = "base.en";
 pub const DEFAULT_WHISPER_THREADS: usize = 4;
-// ~512 token chunks (rough approximation: ~0.75 words/token for English prose).
+
+/// ~512 token chunks (rough approximation: ~0.75 words/token for English prose).
 pub const EMBEDDING_CHUNK_TARGET_WORDS: usize = 384;
+pub const DEFAULT_SEARCH_LIMIT: usize = 8;
+pub const MAX_SEARCH_LIMIT: usize = 50;
 pub const COMMAND_TIMEOUT_SECONDS: u64 = 8;
 pub const DOWNLOAD_TIMEOUT_SECONDS: u64 = 120;
 pub const ALLOWED_IMPORT_EXTENSIONS: [&str; 7] = ["mp3", "m4a", "wav", "flac", "ogg", "opus", "webm"];
@@ -175,6 +180,54 @@ pub struct DocumentDetail {
     pub created_at: String,
     pub updated_at: String,
     pub segments: Vec<TranscriptSegment>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DocumentSort {
+    CreatedDesc,
+    CreatedAsc,
+    TitleAsc,
+    TitleDesc,
+    DurationAsc,
+    DurationDesc,
+}
+
+impl FromStr for DocumentSort {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let value = match s.trim() {
+            "created_asc" => Self::CreatedAsc,
+            "title_asc" => Self::TitleAsc,
+            "title_desc" => Self::TitleDesc,
+            "duration_asc" => Self::DurationAsc,
+            "duration_desc" => Self::DurationDesc,
+            _ => Self::CreatedDesc,
+        };
+
+        Ok(value)
+    }
+}
+
+impl DocumentSort {
+    pub fn parse(sort: Option<&str>) -> Self {
+        let value = sort.unwrap_or("");
+        Self::from_str(value).unwrap_or(Self::CreatedDesc)
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchResult {
+    pub document_id: String,
+    pub document_title: String,
+    pub document_summary: Option<String>,
+    pub document_tags: Vec<String>,
+    pub chunk_index: i64,
+    pub chunk_content: String,
+    pub similarity: f64,
+    pub segment_start_ms: Option<i64>,
+    pub segment_end_ms: Option<i64>,
 }
 
 #[derive(Clone, Debug)]

@@ -19,6 +19,7 @@ pub fn run() {
             let app_data_dir = app.path().app_data_dir().map_err(std::io::Error::other)?;
             let log_dir = app_data_dir.join("logs");
             fs::create_dir_all(&log_dir).map_err(std::io::Error::other)?;
+            app.manage(storage::StorageState::from_app_data_dir(app_data_dir));
 
             app.handle()
                 .plugin(
@@ -49,7 +50,9 @@ pub fn run() {
             commands::import_recorded_audio,
             commands::list_documents,
             commands::get_document,
-            commands::update_document
+            commands::update_document,
+            commands::delete_document,
+            commands::search
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

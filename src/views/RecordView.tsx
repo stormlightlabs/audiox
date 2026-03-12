@@ -1,5 +1,6 @@
 import { getPreferredAudioInputDeviceId, setPreferredAudioInputDeviceId, supportsMediaRecording } from "$/devices";
 import { normalizeError } from "$/errors";
+import { formatElapsed } from "$/format-utils";
 import type { ProgressStatus } from "$/types";
 import { useNavigate } from "@solidjs/router";
 import { invoke } from "@tauri-apps/api/core";
@@ -36,16 +37,6 @@ type ImportedDocument = {
 };
 
 type RecordingPhase = "idle" | "recording" | "paused" | "processing";
-
-function formatElapsed(milliseconds: number): string {
-  const totalSeconds = Math.max(0, Math.floor(milliseconds / 1000));
-  const minutes = Math.floor(totalSeconds / 60);
-  const seconds = totalSeconds % 60;
-  const centiseconds = Math.floor((milliseconds % 1000) / 10);
-  return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}.${
-    String(centiseconds).padStart(2, "0")
-  }`;
-}
 
 function preferredRecordingMimeType(): string {
   const candidates = ["audio/webm;codecs=opus", "audio/webm", "audio/ogg;codecs=opus", "audio/ogg", "audio/mp4"];

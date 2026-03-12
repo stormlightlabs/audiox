@@ -1,7 +1,8 @@
 import { normalizeError } from "$/errors";
-import { useParams } from "@solidjs/router";
+import { formatTimestamp } from "$/format-utils";
+import { useParams, useSearchParams } from "@solidjs/router";
 import { invoke } from "@tauri-apps/api/core";
-import { createEffect, createSignal, For, Show } from "solid-js";
+import { createEffect, createSignal, For, onCleanup, Show } from "solid-js";
 import { ViewScaffold } from "./ViewScaffold";
 
 type TranscriptSegment = { startMs: number; endMs: number; text: string };
@@ -20,14 +21,6 @@ type DocumentDetail = {
   updatedAt: string;
   segments: TranscriptSegment[];
 };
-
-function formatTimestamp(milliseconds: number): string {
-  const totalSeconds = Math.max(0, Math.floor(milliseconds / 1000));
-  const hours = Math.floor(totalSeconds / 3600);
-  const minutes = Math.floor((totalSeconds % 3600) / 60);
-  const seconds = totalSeconds % 60;
-  return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
-}
 
 function parseTagsInput(raw: string): string[] {
   const deduped = new Set<string>();
@@ -57,8 +50,35 @@ function tagsEqual(left: string[], right: string[]): boolean {
   return true;
 }
 
+function segmentDomKey(segment: TranscriptSegment): string {
+  return `${segment.startMs}-${segment.endMs}`;
+}
+
+function segmentForTarget(segments: TranscriptSegment[], targetMs: number): TranscriptSegment | null {
+  if (segments.length === 0) {
+    return null;
+  }
+
+  const exact = segments.find((segment) => targetMs >= segment.startMs && targetMs <= segment.endMs);
+  if (exact) {
+    return exact;
+  }
+
+  let nearest = segments[0];
+  let distance = Math.abs(segments[0].startMs - targetMs);
+  for (const segment of segments.slice(1)) {
+    const nextDistance = Math.abs(segment.startMs - targetMs);
+    if (nextDistance < distance) {
+      nearest = segment;
+      distance = nextDistance;
+    }
+  }
+  return nearest;
+}
+
 export function DocumentView() {
   const params = useParams<{ id?: string }>();
+  const [searchParams] = useSearchParams<{ segment?: string; q?: string }>();
   const [document, setDocument] = createSignal<DocumentDetail | null>(null);
   const [isLoading, setIsLoading] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
@@ -67,6 +87,10 @@ export function DocumentView() {
   const [isSaving, setIsSaving] = createSignal(false);
   const [saveMessage, setSaveMessage] = createSignal<string | null>(null);
   const [saveError, setSaveError] = createSignal<string | null>(null);
+  const [focusedSegmentKey, setFocusedSegmentKey] = createSignal<string | null>(null);
+
+  const segmentElements = new Map<string, HTMLDivElement>();
+  let focusTimer: number | undefined;
 
   createEffect(() => {
     const id = params.id;
@@ -76,6 +100,7 @@ export function DocumentView() {
       setIsLoading(false);
       setSaveMessage(null);
       setSaveError(null);
+      setFocusedSegmentKey(null);
       return;
     }
 
@@ -101,12 +126,56 @@ export function DocumentView() {
       setDraftTitle("");
       setDraftTags("");
       setSaveError(null);
+      segmentElements.clear();
       return;
     }
 
+    segmentElements.clear();
     setDraftTitle(currentDocument.title);
     setDraftTags(tagsInput(currentDocument.tags));
     setSaveError(null);
+  });
+
+  createEffect(() => {
+    const currentDocument = document();
+    const rawSegment = searchParams.segment;
+    if (!currentDocument || !rawSegment) {
+      return;
+    }
+
+    const targetMs = Number(rawSegment);
+    if (!Number.isFinite(targetMs)) {
+      return;
+    }
+
+    const targetSegment = segmentForTarget(currentDocument.segments, targetMs);
+    if (!targetSegment) {
+      return;
+    }
+
+    const key = segmentDomKey(targetSegment);
+    setFocusedSegmentKey(key);
+
+    const frame = globalThis.requestAnimationFrame(() => {
+      segmentElements.get(key)?.scrollIntoView({ behavior: "smooth", block: "center" });
+    });
+
+    if (focusTimer !== undefined) {
+      globalThis.clearTimeout(focusTimer);
+    }
+    focusTimer = globalThis.setTimeout(() => {
+      setFocusedSegmentKey(null);
+    }, 2800);
+
+    onCleanup(() => {
+      globalThis.cancelAnimationFrame(frame);
+    });
+  });
+
+  onCleanup(() => {
+    if (focusTimer !== undefined) {
+      globalThis.clearTimeout(focusTimer);
+    }
   });
 
   const hasUnsavedChanges = () => {
@@ -161,6 +230,14 @@ export function DocumentView() {
           <p class="rounded-xl border border-overlay bg-surface/40 p-4 text-sm text-subtext">
             Select a document from the library to view transcript details.
           </p>
+        </Show>
+
+        <Show when={searchParams.q}>
+          {(query) => (
+            <p class="rounded-xl border border-overlay bg-surface/40 p-3 text-xs text-subtext">
+              Search context: {query()}
+            </p>
+          )}
         </Show>
 
         <Show when={isLoading()}>
@@ -226,9 +303,7 @@ export function DocumentView() {
                     disabled={!hasUnsavedChanges() || isSaving()}>
                     {isSaving() ? "Saving..." : "Save title/tags"}
                   </button>
-                  <Show when={saveMessage()}>
-                    {(message) => <span class="text-xs text-subtext">{message()}</span>}
-                  </Show>
+                  <Show when={saveMessage()}>{(message) => <span class="text-xs text-subtext">{message()}</span>}</Show>
                 </div>
 
                 <Show when={saveError()}>
@@ -253,14 +328,22 @@ export function DocumentView() {
                   fallback={<p class="text-sm text-subtext">{currentDocument().transcript}</p>}>
                   <div class="grid gap-2">
                     <For each={currentDocument().segments}>
-                      {(segment) => (
-                        <div class="rounded-xl border border-overlay/80 bg-elevation/70 px-3 py-2">
-                          <p class="text-[11px] font-semibold tracking-[0.14em] text-subtext uppercase">
-                            {formatTimestamp(segment.startMs)} - {formatTimestamp(segment.endMs)}
-                          </p>
-                          <p class="mt-1 text-sm text-text">{segment.text}</p>
-                        </div>
-                      )}
+                      {(segment) => {
+                        const key = segmentDomKey(segment);
+                        return (
+                          <div
+                            ref={(element) => {
+                              segmentElements.set(key, element);
+                            }}
+                            class="rounded-xl border border-overlay/80 bg-elevation/70 px-3 py-2 transition"
+                            classList={{ "!border-accent/70 ring-2 ring-accent/40": focusedSegmentKey() === key }}>
+                            <p class="text-[11px] font-semibold tracking-[0.14em] text-subtext uppercase">
+                              {formatTimestamp(segment.startMs)} - {formatTimestamp(segment.endMs)}
+                            </p>
+                            <p class="mt-1 text-sm text-text">{segment.text}</p>
+                          </div>
+                        );
+                      }}
                     </For>
                   </div>
                 </Show>

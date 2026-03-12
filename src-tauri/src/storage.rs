@@ -6,7 +6,7 @@ use regex::Regex;
 use rusqlite::{params, Connection, OptionalExtension};
 use std::fs;
 use std::path::{Path, PathBuf};
-use tauri::Manager;
+use tauri::{Manager, State};
 use uuid::Uuid;
 
 pub struct PersistDocumentInput<'a> {
@@ -25,143 +25,212 @@ pub struct PersistDocumentInput<'a> {
     pub chunks: &'a [models::EmbeddedChunk],
 }
 
-pub fn ensure_directory_layout(app_data_dir: &Path) -> Result<Vec<String>, String> {
-    fs::create_dir_all(app_data_dir).map_err(|error| {
-        format!(
-            "failed to create app data directory at {}: {error}",
-            app_data_dir.display()
-        )
-    })?;
+#[derive(Clone, Debug)]
+pub struct FileStore {
+    app_data_dir: PathBuf,
+}
 
-    let mut created_directories = Vec::new();
-    for directory_name in models::REQUIRED_DIRECTORIES {
-        let directory_path = app_data_dir.join(directory_name);
-        if directory_path.exists() {
-            if !directory_path.is_dir() {
-                return Err(format!(
-                    "path exists but is not a directory: {}",
-                    directory_path.display()
-                ));
-            }
-            continue;
-        }
+impl FileStore {
+    pub fn new(app_data_dir: impl Into<PathBuf>) -> Self {
+        Self { app_data_dir: app_data_dir.into() }
+    }
 
-        fs::create_dir_all(&directory_path).map_err(|error| {
+    pub fn from_path(app_data_dir: &Path) -> Self {
+        Self::new(app_data_dir.to_path_buf())
+    }
+
+    pub fn app_data_dir(&self) -> &Path {
+        &self.app_data_dir
+    }
+
+    pub fn bootstrap_at(&self) -> Result<models::AppBootstrapResult, String> {
+        let created_directories = self.ensure_directory_layout()?;
+        let database_path = self.database_path_from_app_data();
+        let data_store = DataStore::new(&database_path)?;
+        data_store.initialize_database()?;
+
+        Ok(models::AppBootstrapResult {
+            app_data_dir: self.app_data_dir.display().to_string(),
+            database_path: database_path.display().to_string(),
+            created_directories,
+            schema_version: models::SCHEMA_VERSION,
+        })
+    }
+
+    pub fn ensure_directory_layout(&self) -> Result<Vec<String>, String> {
+        fs::create_dir_all(&self.app_data_dir).map_err(|error| {
             format!(
-                "failed to create required directory {}: {error}",
-                directory_path.display()
+                "failed to create app data directory at {}: {error}",
+                self.app_data_dir.display()
             )
         })?;
-        created_directories.push(directory_name.to_string());
-    }
 
-    Ok(created_directories)
-}
+        let mut created_directories = Vec::new();
+        for directory_name in models::REQUIRED_DIRECTORIES {
+            let directory_path = self.app_data_dir.join(directory_name);
+            if directory_path.exists() {
+                if !directory_path.is_dir() {
+                    return Err(format!(
+                        "path exists but is not a directory: {}",
+                        directory_path.display()
+                    ));
+                }
+                continue;
+            }
 
-fn upsert_setting(connection: &Connection, key: &str, value: &str) -> Result<(), String> {
-    let key_pattern =
-        Regex::new(r"^[a-z0-9_]+$").map_err(|error| format!("failed to compile key validation regex: {error}"))?;
-
-    if !key_pattern.is_match(key) {
-        return Err(format!("setting key '{key}' is invalid"));
-    }
-
-    connection
-        .execute(
-            "INSERT INTO settings (key, value, updated_at) VALUES (?1, ?2, ?3)
-             ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
-            params![key, value, Utc::now().to_rfc3339()],
-        )
-        .map_err(|error| format!("failed to write setting '{key}': {error}"))?;
-
-    Ok(())
-}
-
-pub fn read_setting(connection: &Connection, key: &str) -> Result<Option<String>, String> {
-    connection
-        .query_row("SELECT value FROM settings WHERE key = ?1", params![key], |row| {
-            row.get::<_, String>(0)
-        })
-        .optional()
-        .map_err(|error| format!("failed to read setting '{key}': {error}"))
-}
-
-pub fn parse_setting_bool(value: Option<String>) -> bool {
-    value
-        .map(|item| item.trim().eq_ignore_ascii_case("true"))
-        .unwrap_or(false)
-}
-
-fn has_column(connection: &Connection, table: &str, column: &str) -> Result<bool, String> {
-    let mut statement = connection
-        .prepare(&format!("PRAGMA table_info({table})"))
-        .map_err(|error| format!("failed to inspect table '{table}': {error}"))?;
-
-    let mut rows = statement
-        .query([])
-        .map_err(|error| format!("failed to query table info for '{table}': {error}"))?;
-    while let Some(row) = rows
-        .next()
-        .map_err(|error| format!("failed while reading table info for '{table}': {error}"))?
-    {
-        let name: String = row
-            .get(1)
-            .map_err(|error| format!("failed to read column metadata for '{table}': {error}"))?;
-        if name == column {
-            return Ok(true);
-        }
-    }
-
-    Ok(false)
-}
-
-fn ensure_documents_table_columns(connection: &Connection) -> Result<(), String> {
-    let required_columns = [
-        ("audio_path", "TEXT"),
-        ("subtitle_srt_path", "TEXT"),
-        ("subtitle_vtt_path", "TEXT"),
-        ("keywords", "TEXT"),
-    ];
-
-    for (column_name, definition) in required_columns {
-        if has_column(connection, "documents", column_name)? {
-            continue;
+            fs::create_dir_all(&directory_path).map_err(|error| {
+                format!(
+                    "failed to create required directory {}: {error}",
+                    directory_path.display()
+                )
+            })?;
+            created_directories.push(directory_name.to_string());
         }
 
-        connection
+        Ok(created_directories)
+    }
+
+    pub fn path_for_storage(&self, path: &Path) -> String {
+        if let Ok(relative) = path.strip_prefix(&self.app_data_dir) {
+            return relative.to_string_lossy().to_string();
+        }
+        path.to_string_lossy().to_string()
+    }
+
+    pub fn resolve_storage_path(&self, stored_path: &str) -> PathBuf {
+        let candidate = PathBuf::from(stored_path);
+        if candidate.is_absolute() {
+            return candidate;
+        }
+        self.app_data_dir.join(candidate)
+    }
+
+    pub fn resolve_whisper_model_path(&self) -> Result<PathBuf, String> {
+        let model_dir = self.app_data_dir.join("models");
+        let preferred = model_dir.join(parsers::whisper_model_file_name(models::DEFAULT_WHISPER_MODEL_NAME));
+        if preferred.is_file() {
+            return Ok(preferred);
+        }
+
+        let entries = fs::read_dir(&model_dir)
+            .map_err(|error| format!("failed to read models directory {}: {error}", model_dir.display()))?;
+        for entry in entries {
+            let path = entry
+                .map_err(|error| format!("failed to inspect models directory {}: {error}", model_dir.display()))?
+                .path();
+            if path.is_file()
+                && path
+                    .extension()
+                    .and_then(|extension| extension.to_str())
+                    .is_some_and(|extension| extension.eq_ignore_ascii_case("bin"))
+            {
+                return Ok(path);
+            }
+        }
+
+        Err(format!(
+            "no whisper model file found in {}. Run setup to download {}.",
+            model_dir.display(),
+            parsers::whisper_model_file_name(models::DEFAULT_WHISPER_MODEL_NAME)
+        ))
+    }
+
+    pub fn database_path_from_app_data(&self) -> PathBuf {
+        self.app_data_dir.join("db").join("audiox.db")
+    }
+}
+
+pub struct DataStore {
+    connection: Connection,
+}
+
+impl DataStore {
+    pub fn new(database_path: &Path) -> Result<Self, String> {
+        let connection = Connection::open(database_path)
+            .map_err(|error| format!("failed to open database {}: {error}", database_path.display()))?;
+        Ok(Self { connection })
+    }
+
+    fn upsert_setting(&self, key: &str, value: &str) -> Result<(), String> {
+        let key_pattern =
+            Regex::new(r"^[a-z0-9_]+$").map_err(|error| format!("failed to compile key validation regex: {error}"))?;
+
+        if !key_pattern.is_match(key) {
+            return Err(format!("setting key '{key}' is invalid"));
+        }
+
+        self.connection
             .execute(
-                &format!("ALTER TABLE documents ADD COLUMN {column_name} {definition}"),
-                [],
+                "INSERT INTO settings (key, value, updated_at) VALUES (?1, ?2, ?3)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+                params![key, value, Utc::now().to_rfc3339()],
             )
-            .map_err(|error| format!("failed to add documents.{column_name}: {error}"))?;
+            .map_err(|error| format!("failed to write setting '{key}': {error}"))?;
+
+        Ok(())
     }
 
-    Ok(())
-}
+    fn has_column(&self, table: &str, column: &str) -> Result<bool, String> {
+        let mut statement = self
+            .connection
+            .prepare(&format!("PRAGMA table_info({table})"))
+            .map_err(|error| format!("failed to inspect table '{table}': {error}"))?;
 
-pub fn database_path_from_app_data(app_data_dir: &Path) -> PathBuf {
-    app_data_dir.join("db").join("audiox.db")
-}
+        let mut rows = statement
+            .query([])
+            .map_err(|error| format!("failed to query table info for '{table}': {error}"))?;
+        while let Some(row) = rows
+            .next()
+            .map_err(|error| format!("failed while reading table info for '{table}': {error}"))?
+        {
+            let name: String = row
+                .get(1)
+                .map_err(|error| format!("failed to read column metadata for '{table}': {error}"))?;
+            if name == column {
+                return Ok(true);
+            }
+        }
 
-pub fn set_setup_completed(database_path: &Path, completed: bool) -> Result<(), String> {
-    let connection = Connection::open(database_path)
-        .map_err(|error| format!("failed to open database {}: {error}", database_path.display()))?;
-
-    let value = if completed { "true" } else { "false" };
-    upsert_setting(&connection, "setup_completed", value)?;
-    if completed {
-        upsert_setting(&connection, "setup_completed_at", &Utc::now().to_rfc3339())?;
+        Ok(false)
     }
-    Ok(())
-}
 
-pub fn initialize_database(database_path: &Path) -> Result<(), String> {
-    let connection = Connection::open(database_path)
-        .map_err(|error| format!("failed to open database {}: {error}", database_path.display()))?;
+    fn ensure_documents_table_columns(&self) -> Result<(), String> {
+        let required_columns = [
+            ("audio_path", "TEXT"),
+            ("subtitle_srt_path", "TEXT"),
+            ("subtitle_vtt_path", "TEXT"),
+            ("keywords", "TEXT"),
+        ];
 
-    connection
-        .execute_batch(
-            "
+        for (column_name, definition) in required_columns {
+            if self.has_column("documents", column_name)? {
+                continue;
+            }
+
+            self.connection
+                .execute(
+                    &format!("ALTER TABLE documents ADD COLUMN {column_name} {definition}"),
+                    [],
+                )
+                .map_err(|error| format!("failed to add documents.{column_name}: {error}"))?;
+        }
+
+        Ok(())
+    }
+
+    pub fn set_setup_completed(&self, completed: bool) -> Result<(), String> {
+        let value = if completed { "true" } else { "false" };
+        self.upsert_setting("setup_completed", value)?;
+        if completed {
+            self.upsert_setting("setup_completed_at", &Utc::now().to_rfc3339())?;
+        }
+        Ok(())
+    }
+
+    pub fn initialize_database(&self) -> Result<(), String> {
+        self.connection
+            .execute_batch(
+                "
           PRAGMA journal_mode = WAL;
           PRAGMA foreign_keys = ON;
           CREATE TABLE IF NOT EXISTS schema_meta (
@@ -215,53 +284,196 @@ pub fn initialize_database(database_path: &Path) -> Result<(), String> {
           CREATE INDEX IF NOT EXISTS idx_chunks_document ON chunks(document_id);
           CREATE INDEX IF NOT EXISTS idx_documents_created ON documents(created_at);
         ",
-        )
-        .map_err(|error| format!("failed to initialize schema: {error}"))?;
+            )
+            .map_err(|error| format!("failed to initialize schema: {error}"))?;
 
-    ensure_documents_table_columns(&connection)?;
+        self.ensure_documents_table_columns()?;
 
-    connection
-        .execute(
-            "INSERT INTO schema_meta (key, value) VALUES (?1, ?2)
-             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            params!["schema_version", models::SCHEMA_VERSION.to_string()],
-        )
-        .map_err(|error| format!("failed to persist schema version: {error}"))?;
+        self.connection
+            .execute(
+                "INSERT INTO schema_meta (key, value) VALUES (?1, ?2)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                params!["schema_version", models::SCHEMA_VERSION.to_string()],
+            )
+            .map_err(|error| format!("failed to persist schema version: {error}"))?;
 
-    let installation_id = connection
-        .query_row("SELECT value FROM settings WHERE key = 'installation_id'", [], |row| {
-            row.get::<_, String>(0)
-        })
-        .optional()
-        .map_err(|error| format!("failed to read installation id: {error}"))?;
+        let installation_id = self
+            .connection
+            .query_row("SELECT value FROM settings WHERE key = 'installation_id'", [], |row| {
+                row.get::<_, String>(0)
+            })
+            .optional()
+            .map_err(|error| format!("failed to read installation id: {error}"))?;
 
-    if installation_id.is_none() {
-        upsert_setting(&connection, "installation_id", &Uuid::new_v4().to_string())?;
+        if installation_id.is_none() {
+            self.upsert_setting("installation_id", &Uuid::new_v4().to_string())?;
+        }
+        self.upsert_setting("last_bootstrap_at", &Utc::now().to_rfc3339())?;
+
+        Ok(())
     }
-    upsert_setting(&connection, "last_bootstrap_at", &Utc::now().to_rfc3339())?;
 
-    Ok(())
+    pub fn persist_document(&mut self, input: &PersistDocumentInput<'_>) -> Result<(), String> {
+        let transaction = self
+            .connection
+            .unchecked_transaction()
+            .map_err(|error| format!("failed to start persistence transaction: {error}"))?;
+
+        let now = Utc::now().to_rfc3339();
+        transaction
+            .execute(
+                "INSERT INTO documents (
+                    id, source_type, source_uri, title, summary, keywords, transcript, audio_path, subtitle_srt_path, subtitle_vtt_path,
+                    duration_seconds, created_at, updated_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                params![
+                    input.document_id,
+                    input.source_type,
+                    input.source_uri,
+                    input.title,
+                    input.summary,
+                    input.keywords_csv,
+                    input.transcript,
+                    input.audio_path,
+                    input.subtitle_srt_path,
+                    input.subtitle_vtt_path,
+                    input.duration_seconds,
+                    now,
+                    now
+                ],
+            )
+            .map_err(|error| format!("failed to insert document {}: {error}", input.document_id))?;
+
+        let mut statement = transaction
+            .prepare(
+                "INSERT INTO document_segments (id, document_id, start_ms, end_ms, text, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            )
+            .map_err(|error| format!("failed to prepare segment insert statement: {error}"))?;
+        for segment in input.segments {
+            statement
+                .execute(params![
+                    Uuid::new_v4().to_string(),
+                    input.document_id,
+                    segment.start_ms,
+                    segment.end_ms,
+                    segment.text,
+                    now
+                ])
+                .map_err(|error| format!("failed to insert document segment for {}: {error}", input.document_id))?;
+        }
+
+        let mut chunk_statement = transaction
+            .prepare(
+                "INSERT INTO chunks (document_id, chunk_index, content, embedding, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+            )
+            .map_err(|error| format!("failed to prepare chunk insert statement: {error}"))?;
+        for chunk in input.chunks {
+            chunk_statement
+                .execute(params![
+                    input.document_id,
+                    chunk.chunk_index,
+                    chunk.content,
+                    embedding_to_blob(&chunk.embedding),
+                    now
+                ])
+                .map_err(|error| format!("failed to insert chunk for {}: {error}", input.document_id))?;
+        }
+
+        drop(chunk_statement);
+        drop(statement);
+        transaction.commit().map_err(|error| {
+            format!(
+                "failed to commit document transaction for {}: {error}",
+                input.document_id
+            )
+        })?;
+        Ok(())
+    }
+}
+
+pub fn parse_setting_bool(value: Option<String>) -> bool {
+    value
+        .map(|item| item.trim().eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
+#[derive(Clone, Debug)]
+pub struct StorageState {
+    file_store: FileStore,
+    database_path: PathBuf,
+}
+
+impl StorageState {
+    pub fn from_app_data_dir(app_data_dir: impl Into<PathBuf>) -> Self {
+        let file_store = FileStore::new(app_data_dir);
+        let database_path = file_store.database_path_from_app_data();
+        Self { file_store, database_path }
+    }
+
+    pub fn app_data_dir(&self) -> &Path {
+        self.file_store.app_data_dir()
+    }
+
+    pub fn database_path(&self) -> &Path {
+        &self.database_path
+    }
+}
+
+pub fn state_from_manager(app: &tauri::AppHandle) -> State<'_, StorageState> {
+    app.state::<StorageState>()
 }
 
 pub fn bootstrap_at(app_data_dir: &Path) -> Result<models::AppBootstrapResult, String> {
-    let created_directories = ensure_directory_layout(app_data_dir)?;
-    let database_path = database_path_from_app_data(app_data_dir);
-    initialize_database(&database_path)?;
+    FileStore::from_path(app_data_dir).bootstrap_at()
+}
 
-    Ok(models::AppBootstrapResult {
-        app_data_dir: app_data_dir.display().to_string(),
-        database_path: database_path.display().to_string(),
-        created_directories,
-        schema_version: models::SCHEMA_VERSION,
-    })
+pub fn ensure_directory_layout(app_data_dir: &Path) -> Result<Vec<String>, String> {
+    FileStore::from_path(app_data_dir).ensure_directory_layout()
+}
+
+pub fn database_path_from_app_data(app_data_dir: &Path) -> PathBuf {
+    FileStore::from_path(app_data_dir).database_path_from_app_data()
+}
+
+pub fn initialize_database(database_path: &Path) -> Result<(), String> {
+    DataStore::new(database_path)?.initialize_database()
+}
+
+pub fn set_setup_completed(database_path: &Path, completed: bool) -> Result<(), String> {
+    DataStore::new(database_path)?.set_setup_completed(completed)
+}
+
+pub fn read_setting(connection: &Connection, key: &str) -> Result<Option<String>, String> {
+    connection
+        .query_row("SELECT value FROM settings WHERE key = ?1", params![key], |row| {
+            row.get::<_, String>(0)
+        })
+        .optional()
+        .map_err(|error| format!("failed to read setting '{key}': {error}"))
+}
+
+pub fn path_for_storage(path: &Path, app_data_dir: &Path) -> String {
+    FileStore::from_path(app_data_dir).path_for_storage(path)
+}
+
+pub fn resolve_storage_path(app_data_dir: &Path, stored_path: &str) -> PathBuf {
+    FileStore::from_path(app_data_dir).resolve_storage_path(stored_path)
+}
+
+pub fn resolve_whisper_model_path(app_data_dir: &Path) -> Result<PathBuf, String> {
+    FileStore::from_path(app_data_dir).resolve_whisper_model_path()
+}
+
+pub fn persist_document(database_path: &Path, input: &PersistDocumentInput<'_>) -> Result<(), String> {
+    let mut data_store = DataStore::new(database_path)?;
+    data_store.persist_document(input)
 }
 
 pub fn bootstrap_from_app(app: &tauri::AppHandle) -> Result<models::AppBootstrapResult, String> {
-    let app_data_dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|error| format!("failed to resolve app data directory: {error}"))?;
-    bootstrap_at(&app_data_dir)
+    let state = state_from_manager(app);
+    bootstrap_at(state.app_data_dir())
 }
 
 pub fn whisper_model_present(models_dir: &Path) -> Result<bool, String> {
@@ -283,123 +495,6 @@ pub fn whisper_model_present(models_dir: &Path) -> Result<bool, String> {
     }
 
     Ok(false)
-}
-
-pub fn path_for_storage(path: &Path, app_data_dir: &Path) -> String {
-    if let Ok(relative) = path.strip_prefix(app_data_dir) {
-        return relative.to_string_lossy().to_string();
-    }
-    path.to_string_lossy().to_string()
-}
-
-pub fn resolve_whisper_model_path(app_data_dir: &Path) -> Result<PathBuf, String> {
-    let model_dir = app_data_dir.join("models");
-    let preferred = model_dir.join(parsers::whisper_model_file_name(models::DEFAULT_WHISPER_MODEL_NAME));
-    if preferred.is_file() {
-        return Ok(preferred);
-    }
-
-    let entries = fs::read_dir(&model_dir)
-        .map_err(|error| format!("failed to read models directory {}: {error}", model_dir.display()))?;
-    for entry in entries {
-        let path = entry
-            .map_err(|error| format!("failed to inspect models directory {}: {error}", model_dir.display()))?
-            .path();
-        if path.is_file()
-            && path
-                .extension()
-                .and_then(|extension| extension.to_str())
-                .is_some_and(|extension| extension.eq_ignore_ascii_case("bin"))
-        {
-            return Ok(path);
-        }
-    }
-
-    Err(format!(
-        "no whisper model file found in {}. Run setup to download {}.",
-        model_dir.display(),
-        parsers::whisper_model_file_name(models::DEFAULT_WHISPER_MODEL_NAME)
-    ))
-}
-
-pub fn persist_document(database_path: &Path, input: &PersistDocumentInput<'_>) -> Result<(), String> {
-    let connection = Connection::open(database_path)
-        .map_err(|error| format!("failed to open database {}: {error}", database_path.display()))?;
-    let transaction = connection
-        .unchecked_transaction()
-        .map_err(|error| format!("failed to start persistence transaction: {error}"))?;
-
-    let now = Utc::now().to_rfc3339();
-    transaction
-        .execute(
-            "INSERT INTO documents (
-                id, source_type, source_uri, title, summary, keywords, transcript, audio_path, subtitle_srt_path, subtitle_vtt_path,
-                duration_seconds, created_at, updated_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
-            params![
-                input.document_id,
-                input.source_type,
-                input.source_uri,
-                input.title,
-                input.summary,
-                input.keywords_csv,
-                input.transcript,
-                input.audio_path,
-                input.subtitle_srt_path,
-                input.subtitle_vtt_path,
-                input.duration_seconds,
-                now,
-                now
-            ],
-        )
-        .map_err(|error| format!("failed to insert document {}: {error}", input.document_id))?;
-
-    let mut statement = transaction
-        .prepare(
-            "INSERT INTO document_segments (id, document_id, start_ms, end_ms, text, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        )
-        .map_err(|error| format!("failed to prepare segment insert statement: {error}"))?;
-    for segment in input.segments {
-        statement
-            .execute(params![
-                Uuid::new_v4().to_string(),
-                input.document_id,
-                segment.start_ms,
-                segment.end_ms,
-                segment.text,
-                now
-            ])
-            .map_err(|error| format!("failed to insert document segment for {}: {error}", input.document_id))?;
-    }
-
-    let mut chunk_statement = transaction
-        .prepare(
-            "INSERT INTO chunks (document_id, chunk_index, content, embedding, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-        )
-        .map_err(|error| format!("failed to prepare chunk insert statement: {error}"))?;
-    for chunk in input.chunks {
-        chunk_statement
-            .execute(params![
-                input.document_id,
-                chunk.chunk_index,
-                chunk.content,
-                embedding_to_blob(&chunk.embedding),
-                now
-            ])
-            .map_err(|error| format!("failed to insert chunk for {}: {error}", input.document_id))?;
-    }
-
-    drop(chunk_statement);
-    drop(statement);
-    transaction.commit().map_err(|error| {
-        format!(
-            "failed to commit document transaction for {}: {error}",
-            input.document_id
-        )
-    })?;
-    Ok(())
 }
 
 fn embedding_to_blob(embedding: &[f32]) -> Vec<u8> {

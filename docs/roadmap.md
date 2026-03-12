@@ -94,7 +94,7 @@ Each milestone produces a usable app. Later milestones build on earlier ones.
 
 **Usable state:** Import audio → automatic transcription → AI generates title/summary/tags → full document view.
 
-## M6: Document Library
+## ✅ M6: Document Library
 
 **Goal:** Browse, manage, and organize all transcribed documents.
 
@@ -107,7 +107,7 @@ Each milestone produces a usable app. Later milestones build on earlier ones.
 
 **Usable state:** User has a browsable library of all their transcribed documents.
 
-## M7: Semantic Search
+## ✅ M7: Semantic Search
 
 **Goal:** Search across all documents using natural language.
 

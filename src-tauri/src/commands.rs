@@ -2,8 +2,10 @@ use super::{bootstrap, models, parsers, storage};
 use chrono::Utc;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::Value;
+use std::cmp::Ordering;
+use std::collections::HashSet;
+use std::path::Path;
 use std::time::Duration;
-use tauri::Manager;
 use uuid::Uuid;
 
 fn recording_extension_for_mime(mime_type: Option<&str>) -> &'static str {
@@ -153,6 +155,190 @@ fn parse_embed_response(payload: &Value) -> Result<Vec<Vec<f32>>, String> {
     Err("ollama embed response did not include embeddings".to_string())
 }
 
+fn managed_paths(app: &tauri::AppHandle) -> (std::path::PathBuf, std::path::PathBuf) {
+    let state = storage::state_from_manager(app);
+    (state.app_data_dir().to_path_buf(), state.database_path().to_path_buf())
+}
+
+fn apply_document_sort(documents: &mut [models::DocumentSummary], sort: models::DocumentSort) {
+    match sort {
+        models::DocumentSort::CreatedDesc => {
+            documents.sort_by(|left, right| right.created_at.cmp(&left.created_at).then(right.id.cmp(&left.id)));
+        }
+        models::DocumentSort::CreatedAsc => {
+            documents.sort_by(|left, right| left.created_at.cmp(&right.created_at).then(left.id.cmp(&right.id)));
+        }
+        models::DocumentSort::TitleAsc => {
+            documents.sort_by(|left, right| {
+                let left_title = left.title.to_ascii_lowercase();
+                let right_title = right.title.to_ascii_lowercase();
+                left_title.cmp(&right_title).then(left.id.cmp(&right.id))
+            });
+        }
+        models::DocumentSort::TitleDesc => {
+            documents.sort_by(|left, right| {
+                let left_title = left.title.to_ascii_lowercase();
+                let right_title = right.title.to_ascii_lowercase();
+                right_title.cmp(&left_title).then(right.id.cmp(&left.id))
+            });
+        }
+        models::DocumentSort::DurationAsc => {
+            documents.sort_by(|left, right| {
+                left.duration_seconds
+                    .unwrap_or_default()
+                    .cmp(&right.duration_seconds.unwrap_or_default())
+                    .then(left.id.cmp(&right.id))
+            });
+        }
+        models::DocumentSort::DurationDesc => {
+            documents.sort_by(|left, right| {
+                right
+                    .duration_seconds
+                    .unwrap_or_default()
+                    .cmp(&left.duration_seconds.unwrap_or_default())
+                    .then(right.id.cmp(&left.id))
+            });
+        }
+    }
+}
+
+fn matches_all_tags(document_tags: &[String], filter_tags: &[String]) -> bool {
+    if filter_tags.is_empty() {
+        return true;
+    }
+
+    let tag_set = document_tags
+        .iter()
+        .map(|tag| tag.to_ascii_lowercase())
+        .collect::<HashSet<_>>();
+    filter_tags
+        .iter()
+        .all(|tag| tag_set.contains(&tag.to_ascii_lowercase()))
+}
+
+fn embedding_from_blob(blob: &[u8]) -> Result<Vec<f32>, String> {
+    if !blob.len().is_multiple_of(4) {
+        return Err(format!(
+            "invalid embedding blob size {}; expected a multiple of 4",
+            blob.len()
+        ));
+    }
+
+    let mut embedding = Vec::with_capacity(blob.len() / 4);
+    for chunk in blob.chunks_exact(4) {
+        embedding.push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
+    }
+
+    if embedding.is_empty() {
+        return Err("embedding blob decoded to an empty vector".to_string());
+    }
+
+    Ok(embedding)
+}
+
+fn cosine_similarity(query: &[f32], candidate: &[f32]) -> Option<f64> {
+    if query.len() != candidate.len() || query.is_empty() {
+        return None;
+    }
+
+    let mut dot = 0_f64;
+    let mut query_norm = 0_f64;
+    let mut candidate_norm = 0_f64;
+    for (query_value, candidate_value) in query.iter().zip(candidate.iter()) {
+        let left = f64::from(*query_value);
+        let right = f64::from(*candidate_value);
+        dot += left * right;
+        query_norm += left * left;
+        candidate_norm += right * right;
+    }
+
+    if query_norm <= f64::EPSILON || candidate_norm <= f64::EPSILON {
+        return None;
+    }
+
+    Some(dot / (query_norm.sqrt() * candidate_norm.sqrt()))
+}
+
+fn normalize_query_terms(query: &str) -> Vec<String> {
+    query
+        .split(|character: char| !character.is_ascii_alphanumeric())
+        .map(str::trim)
+        .filter(|term| term.len() >= 2)
+        .map(|term| term.to_ascii_lowercase())
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+fn is_path_within_root(path: &Path, root: &Path) -> bool {
+    let canonical_root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let canonical_path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    canonical_path.starts_with(canonical_root)
+}
+
+fn remove_file_if_owned(path: &Path, app_data_dir: &Path) -> Result<(), String> {
+    if !path.exists() {
+        return Ok(());
+    }
+
+    if !is_path_within_root(path, app_data_dir) {
+        return Ok(());
+    }
+
+    std::fs::remove_file(path).map_err(|error| format!("failed to delete {}: {error}", path.display()))
+}
+
+fn find_matching_segment_for_chunk(
+    connection: &Connection, document_id: &str, chunk_content: &str, query_terms: &[String],
+) -> Result<(Option<i64>, Option<i64>), String> {
+    let mut statement = connection
+        .prepare(
+            "SELECT start_ms, end_ms, text
+             FROM document_segments
+             WHERE document_id = ?1
+             ORDER BY start_ms ASC, end_ms ASC",
+        )
+        .map_err(|error| format!("failed to prepare segment lookup for {document_id}: {error}"))?;
+
+    let rows = statement
+        .query_map(params![document_id], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?, row.get::<_, String>(2)?))
+        })
+        .map_err(|error| format!("failed to query segments for {document_id}: {error}"))?;
+
+    let chunk_text = chunk_content.to_ascii_lowercase();
+    let mut fallback_match: Option<(i64, i64, usize)> = None;
+    for row in rows {
+        let (start_ms, end_ms, text) =
+            row.map_err(|error| format!("failed to decode segment for {document_id}: {error}"))?;
+        let segment_text = text.trim().to_ascii_lowercase();
+        if segment_text.is_empty() {
+            continue;
+        }
+
+        if segment_text.len() >= 8 && chunk_text.contains(&segment_text) {
+            return Ok((Some(start_ms), Some(end_ms)));
+        }
+
+        let overlap_score = query_terms
+            .iter()
+            .filter(|term| segment_text.contains(term.as_str()))
+            .count();
+        if overlap_score == 0 {
+            continue;
+        }
+
+        match fallback_match {
+            Some((_, _, best_score)) if best_score >= overlap_score => {}
+            _ => {
+                fallback_match = Some((start_ms, end_ms, overlap_score));
+            }
+        }
+    }
+
+    Ok(fallback_match.map_or((None, None), |(start_ms, end_ms, _)| (Some(start_ms), Some(end_ms))))
+}
+
 async fn process_document_ai(
     transcript: &str, segments: &[models::TranscriptSegment], fallback_title: &str,
 ) -> Result<(String, Option<String>, Vec<String>, Vec<models::EmbeddedChunk>), String> {
@@ -245,16 +431,12 @@ async fn process_document_ai(
 #[tauri::command]
 #[allow(clippy::needless_pass_by_value)]
 pub async fn download_whisper_model(app: tauri::AppHandle, model: Option<String>) -> Result<String, String> {
-    let app_data_dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|error| format!("failed to resolve app data directory: {error}"))?;
+    let (app_data_dir, database_path) = managed_paths(&app);
     storage::ensure_directory_layout(&app_data_dir)?;
 
     let model_name =
         parsers::validate_whisper_model_name(model.as_deref().unwrap_or(models::DEFAULT_WHISPER_MODEL_NAME))?;
     let model_path = bootstrap::download_whisper_model_file(&app, &app_data_dir, &model_name).await?;
-    let database_path = storage::database_path_from_app_data(&app_data_dir);
     storage::initialize_database(&database_path)?;
     let setup_status = bootstrap::check_setup_state(&app_data_dir).await?;
     log::info!(
@@ -346,10 +528,7 @@ pub async fn pull_ollama_model(app: tauri::AppHandle, model: String) -> Result<(
         );
     }
 
-    let app_data_dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|error| format!("failed to resolve app data directory: {error}"))?;
+    let (app_data_dir, _) = managed_paths(&app);
     let setup_status = bootstrap::check_setup_state(&app_data_dir).await?;
     log::info!(
         "pulled ollama model {} (missing_models_after_pull={})",
@@ -362,14 +541,11 @@ pub async fn pull_ollama_model(app: tauri::AppHandle, model: String) -> Result<(
 
 #[tauri::command]
 #[allow(clippy::needless_pass_by_value)]
-pub fn list_documents(app: tauri::AppHandle) -> Result<Vec<models::DocumentSummary>, String> {
-    let app_data_dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|error| format!("failed to resolve app data directory: {error}"))?;
+pub fn list_documents(
+    app: tauri::AppHandle, sort: Option<String>, filter_tags: Option<Vec<String>>,
+) -> Result<Vec<models::DocumentSummary>, String> {
+    let (app_data_dir, database_path) = managed_paths(&app);
     storage::ensure_directory_layout(&app_data_dir)?;
-
-    let database_path = storage::database_path_from_app_data(&app_data_dir);
     storage::initialize_database(&database_path)?;
 
     let connection = Connection::open(&database_path)
@@ -377,8 +553,7 @@ pub fn list_documents(app: tauri::AppHandle) -> Result<Vec<models::DocumentSumma
     let mut statement = connection
         .prepare(
             "SELECT id, title, summary, keywords, duration_seconds, created_at, updated_at
-             FROM documents
-             ORDER BY datetime(created_at) DESC, created_at DESC",
+             FROM documents",
         )
         .map_err(|error| format!("failed to prepare list_documents query: {error}"))?;
 
@@ -400,6 +575,14 @@ pub fn list_documents(app: tauri::AppHandle) -> Result<Vec<models::DocumentSumma
     for row in rows {
         documents.push(row.map_err(|error| format!("failed to decode document row: {error}"))?);
     }
+
+    let requested_tags = filter_tags.unwrap_or_default();
+    let tag_filter = parsers::sanitize_tags(&requested_tags);
+    if !tag_filter.is_empty() {
+        documents.retain(|document| matches_all_tags(&document.tags, &tag_filter));
+    }
+
+    apply_document_sort(&mut documents, models::DocumentSort::parse(sort.as_deref()));
     Ok(documents)
 }
 
@@ -411,13 +594,8 @@ pub fn get_document(app: tauri::AppHandle, id: String) -> Result<models::Documen
         return Err("id must not be empty".to_string());
     }
 
-    let app_data_dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|error| format!("failed to resolve app data directory: {error}"))?;
+    let (app_data_dir, database_path) = managed_paths(&app);
     storage::ensure_directory_layout(&app_data_dir)?;
-
-    let database_path = storage::database_path_from_app_data(&app_data_dir);
     storage::initialize_database(&database_path)?;
 
     let connection = Connection::open(&database_path)
@@ -483,13 +661,8 @@ pub fn update_document(
         return Err("id must not be empty".to_string());
     }
 
-    let app_data_dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|error| format!("failed to resolve app data directory: {error}"))?;
+    let (app_data_dir, database_path) = managed_paths(&app);
     storage::ensure_directory_layout(&app_data_dir)?;
-
-    let database_path = storage::database_path_from_app_data(&app_data_dir);
     storage::initialize_database(&database_path)?;
 
     let connection = Connection::open(&database_path)
@@ -535,6 +708,232 @@ pub fn update_document(
 
 #[tauri::command]
 #[allow(clippy::needless_pass_by_value)]
+pub fn delete_document(app: tauri::AppHandle, id: String) -> Result<(), String> {
+    let document_id = id.trim().to_string();
+    if document_id.is_empty() {
+        return Err("id must not be empty".to_string());
+    }
+
+    let (app_data_dir, database_path) = managed_paths(&app);
+    storage::ensure_directory_layout(&app_data_dir)?;
+    storage::initialize_database(&database_path)?;
+
+    let connection = Connection::open(&database_path)
+        .map_err(|error| format!("failed to open database {}: {error}", database_path.display()))?;
+    let transaction = connection
+        .unchecked_transaction()
+        .map_err(|error| format!("failed to start deletion transaction for {document_id}: {error}"))?;
+
+    let (audio_path, subtitle_srt_path, subtitle_vtt_path) = transaction
+        .query_row(
+            "SELECT audio_path, subtitle_srt_path, subtitle_vtt_path
+             FROM documents
+             WHERE id = ?1",
+            params![document_id],
+            |row| {
+                Ok((
+                    row.get::<_, Option<String>>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|error| format!("failed to load document {document_id} for deletion: {error}"))?
+        .ok_or_else(|| format!("document {document_id} was not found"))?;
+
+    transaction
+        .execute("DELETE FROM documents WHERE id = ?1", params![document_id])
+        .map_err(|error| format!("failed to delete document {document_id}: {error}"))?;
+    transaction
+        .commit()
+        .map_err(|error| format!("failed to commit deletion for {document_id}: {error}"))?;
+
+    let mut cleanup_paths = Vec::new();
+    for value in [audio_path, subtitle_srt_path, subtitle_vtt_path].into_iter().flatten() {
+        cleanup_paths.push(storage::resolve_storage_path(&app_data_dir, &value));
+    }
+
+    let audio_dir = app_data_dir.join("audio");
+    let source_prefix = format!("{document_id}-");
+    if let Ok(entries) = std::fs::read_dir(&audio_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Some(file_name) = path.file_name().and_then(|item| item.to_str()) else {
+                continue;
+            };
+            if file_name.starts_with(&source_prefix) {
+                cleanup_paths.push(path);
+            }
+        }
+    }
+
+    for path in cleanup_paths {
+        remove_file_if_owned(&path, &app_data_dir)?;
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
+#[allow(clippy::needless_pass_by_value)]
+pub async fn search(
+    app: tauri::AppHandle, query: String, limit: Option<usize>,
+) -> Result<Vec<models::SearchResult>, String> {
+    let trimmed_query = query.trim().to_string();
+    if trimmed_query.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let (app_data_dir, database_path) = managed_paths(&app);
+    storage::ensure_directory_layout(&app_data_dir)?;
+    storage::initialize_database(&database_path)?;
+
+    let requested_limit = limit
+        .unwrap_or(models::DEFAULT_SEARCH_LIMIT)
+        .clamp(1, models::MAX_SEARCH_LIMIT);
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(60))
+        .build()
+        .map_err(|error| format!("failed to initialize Ollama HTTP client: {error}"))?;
+
+    let embed_response = client
+        .post(models::OLLAMA_EMBED_URL)
+        .json(&serde_json::json!({
+            "model": models::OLLAMA_EMBED_MODEL,
+            "input": [trimmed_query]
+        }))
+        .send()
+        .await
+        .map_err(|error| format!("failed to call Ollama embed endpoint: {error}"))?;
+    if !embed_response.status().is_success() {
+        let status = embed_response.status();
+        let body = embed_response.text().await.unwrap_or_default();
+        return Err(format!("semantic search embedding failed with status {status}: {body}"));
+    }
+
+    let embed_payload = embed_response
+        .json::<Value>()
+        .await
+        .map_err(|error| format!("failed to parse Ollama embed response: {error}"))?;
+    let query_embedding = parse_embed_response(&embed_payload)?
+        .into_iter()
+        .next()
+        .ok_or_else(|| "semantic search embedding did not return a vector".to_string())?;
+
+    let connection = Connection::open(&database_path)
+        .map_err(|error| format!("failed to open database {}: {error}", database_path.display()))?;
+
+    let mut statement = connection
+        .prepare(
+            "SELECT
+               chunks.document_id,
+               chunks.chunk_index,
+               chunks.content,
+               chunks.embedding,
+               documents.title,
+               documents.summary,
+               documents.keywords
+             FROM chunks
+             JOIN documents ON documents.id = chunks.document_id",
+        )
+        .map_err(|error| format!("failed to prepare semantic search query: {error}"))?;
+
+    #[derive(Clone)]
+    struct RankedChunk {
+        document_id: String,
+        chunk_index: i64,
+        chunk_content: String,
+        document_title: String,
+        document_summary: Option<String>,
+        document_tags: Vec<String>,
+        similarity: f64,
+    }
+
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, Vec<u8>>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, Option<String>>(5)?,
+                row.get::<_, Option<String>>(6)?,
+            ))
+        })
+        .map_err(|error| format!("failed to execute semantic search query: {error}"))?;
+
+    let mut ranked = Vec::new();
+    for row in rows {
+        let (document_id, chunk_index, chunk_content, embedding_blob, document_title, document_summary, keywords_csv) =
+            row.map_err(|error| format!("failed to decode semantic search row: {error}"))?;
+
+        let embedding = match embedding_from_blob(&embedding_blob) {
+            Ok(value) => value,
+            Err(error) => {
+                log::warn!(
+                    "skipping chunk {}:{} due to invalid embedding: {}",
+                    document_id,
+                    chunk_index,
+                    error
+                );
+                continue;
+            }
+        };
+
+        let Some(similarity) = cosine_similarity(&query_embedding, &embedding) else {
+            continue;
+        };
+        ranked.push(RankedChunk {
+            document_id,
+            chunk_index,
+            chunk_content,
+            document_title,
+            document_summary,
+            document_tags: parsers::parse_keywords_csv(keywords_csv.as_deref()),
+            similarity,
+        });
+    }
+
+    ranked.sort_by(|left, right| {
+        right
+            .similarity
+            .partial_cmp(&left.similarity)
+            .unwrap_or(Ordering::Equal)
+            .then(right.document_id.cmp(&left.document_id))
+            .then(right.chunk_index.cmp(&left.chunk_index))
+    });
+
+    let query_terms = normalize_query_terms(&trimmed_query);
+    let mut results = Vec::new();
+    for candidate in ranked.into_iter().take(requested_limit) {
+        let (segment_start_ms, segment_end_ms) = find_matching_segment_for_chunk(
+            &connection,
+            &candidate.document_id,
+            &candidate.chunk_content,
+            &query_terms,
+        )?;
+
+        results.push(models::SearchResult {
+            document_id: candidate.document_id,
+            document_title: candidate.document_title,
+            document_summary: candidate.document_summary,
+            document_tags: candidate.document_tags,
+            chunk_index: candidate.chunk_index,
+            chunk_content: candidate.chunk_content,
+            similarity: candidate.similarity,
+            segment_start_ms,
+            segment_end_ms,
+        });
+    }
+
+    Ok(results)
+}
+
+#[tauri::command]
+#[allow(clippy::needless_pass_by_value)]
 pub fn initialize_app(app: tauri::AppHandle) -> Result<models::AppBootstrapResult, String> {
     storage::bootstrap_from_app(&app)
 }
@@ -542,10 +941,7 @@ pub fn initialize_app(app: tauri::AppHandle) -> Result<models::AppBootstrapResul
 #[tauri::command]
 #[allow(clippy::needless_pass_by_value)]
 pub async fn preflight(app: tauri::AppHandle) -> Result<models::PreflightResult, String> {
-    let app_data_dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|error| format!("failed to resolve app data directory: {error}"))?;
+    let (app_data_dir, database_path) = managed_paths(&app);
 
     storage::ensure_directory_layout(&app_data_dir)?;
 
@@ -686,7 +1082,6 @@ pub async fn preflight(app: tauri::AppHandle) -> Result<models::PreflightResult,
         }
     }
 
-    let database_path = storage::database_path_from_app_data(&app_data_dir);
     match storage::initialize_database(&database_path) {
         Ok(_) => bootstrap::record_preflight_detail(
             &app,
@@ -729,12 +1124,8 @@ pub async fn import_audio_file(app: tauri::AppHandle, source_path: String) -> Re
     let source = std::path::PathBuf::from(source_trimmed);
     parsers::ensure_supported_import_path(&source)?;
 
-    let app_data_dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|error| format!("failed to resolve app data directory: {error}"))?;
+    let (app_data_dir, database_path) = managed_paths(&app);
     storage::ensure_directory_layout(&app_data_dir)?;
-    let database_path = storage::database_path_from_app_data(&app_data_dir);
     storage::initialize_database(&database_path)?;
 
     let ffmpeg_program = bootstrap::resolve_runtime_binary_program(&app_data_dir, &models::FFMPEG_BINARY_SPEC).await?;
@@ -838,12 +1229,8 @@ pub async fn import_recorded_audio(
         return Err("audio_bytes must not be empty".to_string());
     }
 
-    let app_data_dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|error| format!("failed to resolve app data directory: {error}"))?;
+    let (app_data_dir, database_path) = managed_paths(&app);
     storage::ensure_directory_layout(&app_data_dir)?;
-    let database_path = storage::database_path_from_app_data(&app_data_dir);
     storage::initialize_database(&database_path)?;
 
     let ffmpeg_program = bootstrap::resolve_runtime_binary_program(&app_data_dir, &models::FFMPEG_BINARY_SPEC).await?;
@@ -938,10 +1325,7 @@ pub async fn import_recorded_audio(
 #[tauri::command]
 #[allow(clippy::needless_pass_by_value)]
 pub async fn check_setup(app: tauri::AppHandle) -> Result<models::SetupStatus, String> {
-    let app_data_dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|error| format!("failed to resolve app data directory: {error}"))?;
+    let (app_data_dir, _) = managed_paths(&app);
 
     let setup = bootstrap::check_setup_state(&app_data_dir).await?;
     log::info!(
