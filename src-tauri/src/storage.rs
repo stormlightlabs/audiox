@@ -11,6 +11,7 @@ use uuid::Uuid;
 
 pub struct PersistDocumentInput<'a> {
     pub document_id: &'a str,
+    pub source_type: &'a str,
     pub title: &'a str,
     pub source_uri: &'a str,
     pub transcript: &'a str,
@@ -317,7 +318,7 @@ pub fn persist_document(database_path: &Path, input: &PersistDocumentInput<'_>) 
              ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
             params![
                 input.document_id,
-                "file_import",
+                input.source_type,
                 input.source_uri,
                 input.title,
                 Option::<String>::None,

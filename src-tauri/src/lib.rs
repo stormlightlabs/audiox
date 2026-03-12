@@ -46,6 +46,7 @@ pub fn run() {
             commands::download_whisper_model,
             commands::pull_ollama_model,
             commands::import_audio_file,
+            commands::import_recorded_audio,
             commands::list_documents,
             commands::get_document
         ])

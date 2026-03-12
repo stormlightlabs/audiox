@@ -3,6 +3,33 @@ use rusqlite::{params, Connection, OptionalExtension};
 use tauri::Manager;
 use uuid::Uuid;
 
+fn recording_extension_for_mime(mime_type: Option<&str>) -> &'static str {
+    let Some(raw_mime_type) = mime_type else {
+        return "webm";
+    };
+
+    let normalized = raw_mime_type.trim().to_ascii_lowercase();
+    if normalized.starts_with("audio/webm") {
+        return "webm";
+    }
+    if normalized.starts_with("audio/ogg") {
+        return "ogg";
+    }
+    if normalized.starts_with("audio/wav")
+        || normalized.starts_with("audio/x-wav")
+        || normalized.starts_with("audio/wave")
+    {
+        return "wav";
+    }
+    if normalized.starts_with("audio/mp4")
+        || normalized.starts_with("audio/x-m4a")
+        || normalized.starts_with("audio/mpeg")
+    {
+        return "m4a";
+    }
+    "webm"
+}
+
 #[tauri::command]
 #[allow(clippy::needless_pass_by_value)]
 pub async fn download_whisper_model(app: tauri::AppHandle, model: Option<String>) -> Result<String, String> {
@@ -495,6 +522,106 @@ pub async fn import_audio_file(app: tauri::AppHandle, source_path: String) -> Re
         &database_path,
         &storage::PersistDocumentInput {
             document_id: &document_id,
+            source_type: "file_import",
+            title: &title,
+            source_uri: &source_uri,
+            transcript: &transcript,
+            audio_path: &audio_path,
+            subtitle_srt_path: &subtitle_srt,
+            subtitle_vtt_path: &subtitle_vtt,
+            duration_seconds,
+            segments: &segments,
+        },
+    )?;
+
+    let created_at = chrono::Utc::now().to_rfc3339();
+    Ok(models::ImportedDocument {
+        id: document_id,
+        title,
+        transcript,
+        audio_path,
+        subtitle_srt_path: subtitle_srt,
+        subtitle_vtt_path: subtitle_vtt,
+        duration_seconds,
+        created_at,
+        segments,
+    })
+}
+
+#[tauri::command]
+#[allow(clippy::needless_pass_by_value)]
+pub async fn import_recorded_audio(
+    app: tauri::AppHandle, audio_bytes: Vec<u8>, mime_type: Option<String>,
+) -> Result<models::ImportedDocument, String> {
+    if audio_bytes.is_empty() {
+        return Err("audio_bytes must not be empty".to_string());
+    }
+
+    let app_data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| format!("failed to resolve app data directory: {error}"))?;
+    storage::ensure_directory_layout(&app_data_dir)?;
+    let database_path = storage::database_path_from_app_data(&app_data_dir);
+    storage::initialize_database(&database_path)?;
+
+    let ffmpeg_program = bootstrap::resolve_runtime_binary_program(&app_data_dir, &models::FFMPEG_BINARY_SPEC).await?;
+    let whisper_program =
+        bootstrap::resolve_runtime_binary_program(&app_data_dir, &models::WHISPER_BINARY_SPEC).await?;
+    let model_path = storage::resolve_whisper_model_path(&app_data_dir)?;
+
+    let document_id = Uuid::new_v4().to_string();
+    let recording_extension = recording_extension_for_mime(mime_type.as_deref());
+    let recorded_source_path = app_data_dir
+        .join("audio")
+        .join(format!("{document_id}-recording.{recording_extension}"));
+    std::fs::write(&recorded_source_path, &audio_bytes)
+        .map_err(|error| format!("failed to persist recorded audio payload: {error}"))?;
+
+    let converted_wav_path = app_data_dir.join("audio").join(format!("{document_id}.wav"));
+    bootstrap::run_ffmpeg_conversion(&app, &ffmpeg_program, &recorded_source_path, &converted_wav_path).await?;
+
+    if recorded_source_path.is_file() {
+        let _ = std::fs::remove_file(&recorded_source_path);
+    }
+
+    let subtitle_base = app_data_dir.join("subtitles").join(&document_id);
+    let segments =
+        bootstrap::run_whisper_transcription(&app, &whisper_program, &model_path, &converted_wav_path, &subtitle_base)
+            .await?;
+    if segments.is_empty() {
+        return Err("whisper transcription did not return any transcript segments".to_string());
+    }
+
+    let subtitle_srt_path = subtitle_base.with_extension("srt");
+    let subtitle_vtt_path = subtitle_base.with_extension("vtt");
+    if !subtitle_srt_path.is_file() {
+        return Err(format!(
+            "whisper did not generate expected subtitle file {}",
+            subtitle_srt_path.display()
+        ));
+    }
+    if !subtitle_vtt_path.is_file() {
+        return Err(format!(
+            "whisper did not generate expected subtitle file {}",
+            subtitle_vtt_path.display()
+        ));
+    }
+
+    let transcript = parsers::build_transcript_text(&segments);
+    let duration_seconds = parsers::max_duration_seconds(&segments);
+    let title = format!("Recording {}", chrono::Utc::now().format("%Y-%m-%d %H:%M UTC"));
+
+    let audio_path = storage::path_for_storage(&converted_wav_path, &app_data_dir);
+    let subtitle_srt = storage::path_for_storage(&subtitle_srt_path, &app_data_dir);
+    let subtitle_vtt = storage::path_for_storage(&subtitle_vtt_path, &app_data_dir);
+    let source_uri = format!("microphone://{}", mime_type.unwrap_or_else(|| "audio/webm".to_string()));
+
+    storage::persist_document(
+        &database_path,
+        &storage::PersistDocumentInput {
+            document_id: &document_id,
+            source_type: "microphone_recording",
             title: &title,
             source_uri: &source_uri,
             transcript: &transcript,

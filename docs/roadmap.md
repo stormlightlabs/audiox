@@ -10,7 +10,7 @@ Each milestone produces a usable app. Later milestones build on earlier ones.
 - Part 4: M9 - M10
 - Part 5: M11 - M12
 
-## M1: Project Scaffold & Shell
+## ✅ M1: Project Scaffold & Shell
 
 **Goal:** Tauri + SolidJS app boots, Tailwind styling works, basic navigation between views.
 
@@ -25,7 +25,7 @@ Each milestone produces a usable app. Later milestones build on earlier ones.
 
 **Usable state:** App launches, navigates between empty views, database is ready.
 
-## M2: Preflight Splash Screen
+## ✅ M2: Preflight Splash Screen
 
 **Goal:** Every launch validates runtime dependencies before showing the main UI.
 
@@ -44,7 +44,7 @@ Each milestone produces a usable app. Later milestones build on earlier ones.
 
 **Usable state:** App boots → splash validates everything → user knows exactly what's ready or needs attention.
 
-## M3: First-Run Setup & Dependency Management
+## ✅ M3: First-Run Setup & Dependency Management
 
 **Goal:** App is one-click ready on first run (only models are downloaded).
 
@@ -57,7 +57,7 @@ Each milestone produces a usable app. Later milestones build on earlier ones.
 
 **Usable state:** User launches app → clicks setup → models download/pull → app is ready for use.
 
-## M4: Audio Import & Transcription (with ffmpeg)
+## ✅ M4: Audio Import & Transcription (with ffmpeg)
 
 **Goal:** Import an audio file, convert it with ffmpeg, and get a transcript.
 
@@ -145,7 +145,7 @@ Each milestone produces a usable app. Later milestones build on earlier ones.
 
 **Usable state:** User pastes a URL → sees video/audio preview → downloads → gets a fully processed document in their library.
 
-## M9: Microphone Recording
+## ✅ M9: Microphone Recording
 
 **Goal:** Record audio directly from the microphone within the app.
 
@@ -191,17 +191,17 @@ Each milestone produces a usable app. Later milestones build on earlier ones.
 
 **Usable state:** User can tune performance/accuracy tradeoff and manage disk usage.
 
-## M12: Polish & Quality of Life
+## M12: Polish & Quality of Life/Parking Lot
 
 **Goal:** Production-quality UX.
 
-- Page transitions with solid-motionone (view enter/exit animations)
-- Loading/processing states with skeleton screens
-- Error handling with user-friendly messages and retry actions
-- Drag-and-drop audio/video file import (in addition to file picker)
-- Keyboard shortcuts (Ctrl+N record, Ctrl+F search, etc.)
-- Audio playback in Document view synced with transcript timestamps (click segment → play from that point)
-- Export document as Markdown file
-- Empty states for library, search results
-- Window title updates based on current view
-- App icon and branding
+- [ ]  Page transitions with solid-motionone (view enter/exit animations)
+- [ ] Loading/processing states with skeleton screens
+- [ ] Error handling with user-friendly messages and retry actions
+- [ ] Drag-and-drop audio/video file import (in addition to file picker)
+- [ ] Keyboard shortcuts (Ctrl+N record, Ctrl+F search, etc.)
+- [ ] Audio playback in Document view synced with transcript timestamps (click segment → play from that point)
+- [ ] Export document as Markdown file
+- [ ] Empty states for library, search results
+- [ ] Window title updates based on current view
+- [ ] App icon and branding
