@@ -5,7 +5,7 @@ import { A, useParams, useSearchParams } from "@solidjs/router";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import * as logger from "@tauri-apps/plugin-log";
-import { createEffect, createSignal, For, onCleanup, onMount, Show } from "solid-js";
+import { createEffect, createSignal, For, type JSX, onCleanup, onMount, Show } from "solid-js";
 import { ViewScaffold } from "./ViewScaffold";
 
 const DOCUMENT_METADATA_PROGRESS_EVENT = "document://metadata-progress";
@@ -15,6 +15,8 @@ type MetadataProgress = { status: ProgressStatus; message: string; percent: numb
 
 type DocumentDetail = {
   id: string;
+  sourceType: string;
+  sourceUri: string | null;
   title: string;
   summary: string | null;
   tags: string[];
@@ -27,6 +29,8 @@ type DocumentDetail = {
   updatedAt: string;
   segments: TranscriptSegment[];
 };
+
+type RenderableSegment = string | JSX.Element;
 
 function parseTagsInput(raw: string): string[] {
   const deduped = new Set<string>();
@@ -82,6 +86,129 @@ function segmentForTarget(segments: TranscriptSegment[], targetMs: number): Tran
   return nearest;
 }
 
+function sourceBadgeLabel(sourceType: string): string | null {
+  if (sourceType === "text_note") {
+    return "Text Note";
+  }
+  if (sourceType === "text_paste") {
+    return "Pasted Note";
+  }
+  return null;
+}
+
+function isTextSource(sourceType: string): boolean {
+  return sourceType === "text_note" || sourceType === "text_paste";
+}
+
+function isMarkdownSource(document: DocumentDetail): boolean {
+  if (document.sourceType !== "text_note" || !document.sourceUri) {
+    return false;
+  }
+  return document.sourceUri.trim().toLowerCase().endsWith(".md");
+}
+
+function renderInlineCode(text: string): RenderableSegment[] {
+  const parts = text.split(/(`[^`]+`)/gu);
+  return parts.map((part) => {
+    if (part.startsWith("`") && part.endsWith("`") && part.length >= 2) {
+      return <code class="rounded bg-surface/80 px-1 py-0.5 text-xs text-text">{part.slice(1, -1)}</code>;
+    }
+    return part;
+  });
+}
+
+function renderMarkdownBlocks(content: string) {
+  const lines = content.replaceAll("\r\n", "\n").split("\n");
+  const blocks: JSX.Element[] = [];
+  let index = 0;
+
+  while (index < lines.length) {
+    const current = lines[index].trimEnd();
+    if (!current.trim()) {
+      index += 1;
+      continue;
+    }
+
+    const fencedCode = /^```([^\s`]+)?\s*$/u.exec(current.trim());
+    if (fencedCode) {
+      const language = fencedCode[1]?.trim() || "text";
+      index += 1;
+      const codeLines: string[] = [];
+      while (index < lines.length && !lines[index].trim().startsWith("```")) {
+        codeLines.push(lines[index]);
+        index += 1;
+      }
+      if (index < lines.length) {
+        index += 1;
+      }
+      blocks.push(
+        <pre class="overflow-x-auto rounded-2xl border border-overlay bg-surface/80 p-3">
+          <code data-language={language} class="text-xs text-text whitespace-pre-wrap">
+            {codeLines.join("\n")}
+          </code>
+        </pre>,
+      );
+      continue;
+    }
+
+    const heading = /^(#{1,6})\s+(.+)$/u.exec(current.trim());
+    if (heading) {
+      const level = heading[1].length;
+      const contentValue = heading[2].trim();
+      const classByLevel = ["text-2xl", "text-xl", "text-lg", "text-base", "text-sm", "text-sm"] as const;
+      blocks.push(
+        <p class={`font-semibold text-text ${classByLevel[Math.min(level - 1, 5)]}`}>
+          {renderInlineCode(contentValue)}
+        </p>,
+      );
+      index += 1;
+      continue;
+    }
+
+    if (/^\s*[-*+]\s+/.test(current)) {
+      const listItems: string[] = [];
+      while (index < lines.length && /^\s*[-*+]\s+/.test(lines[index])) {
+        const item = lines[index].replace(/^\s*[-*+]\s+/u, "").trim();
+        if (item) {
+          listItems.push(item);
+        }
+        index += 1;
+      }
+
+      blocks.push(
+        <ul class="grid gap-1 pl-5 text-sm text-text list-disc">
+          <For each={listItems}>{(item) => <li>{renderInlineCode(item)}</li>}</For>
+        </ul>,
+      );
+      continue;
+    }
+
+    const paragraphLines: string[] = [];
+    while (index < lines.length) {
+      const candidate = lines[index].trimEnd();
+      if (!candidate.trim()) {
+        break;
+      }
+      if (
+        candidate.trim().startsWith("```") || /^(#{1,6})\s+/u.test(candidate.trim()) || /^\s*[-*+]\s+/.test(candidate)
+      ) {
+        break;
+      }
+      paragraphLines.push(candidate.trim());
+      index += 1;
+    }
+
+    if (paragraphLines.length > 0) {
+      blocks.push(<p class="text-sm leading-relaxed text-text">{renderInlineCode(paragraphLines.join(" "))}</p>);
+      continue;
+    }
+
+    index += 1;
+  }
+
+  return <div class="grid gap-3">{blocks}</div>;
+}
+
 function LoadingSkeleton() {
   return (
     <div class="grid gap-3" aria-hidden="true">
@@ -106,6 +233,45 @@ function ProgressBar(props: { percent: number }) {
         class="h-full rounded-full bg-accent/75 transition-[width] duration-200"
         style={{ width: `${Math.max(0, Math.min(100, props.percent))}%` }} />
     </div>
+  );
+}
+
+function DocumentSegments(
+  props: {
+    segments: TranscriptSegment[];
+    transcript: string;
+    segmentElements: Map<string, HTMLElement>;
+    focusedSegmentKey: string | null;
+  },
+) {
+  const segmentElements = () => props.segmentElements;
+  const focusedSegmentKey = () => props.focusedSegmentKey;
+  const segments = () => props.segments;
+  const transcript = () => props.transcript;
+
+  return (
+    <Show when={segments().length > 0} fallback={<p class="text-sm text-subtext">{transcript()}</p>}>
+      <div class="grid gap-2">
+        <For each={segments()}>
+          {(segment) => {
+            const key = segmentDomKey(segment);
+            return (
+              <div
+                ref={(element) => {
+                  segmentElements().set(key, element);
+                }}
+                class="rounded-xl border border-overlay/80 bg-elevation/70 px-3 py-2 transition"
+                classList={{ "!border-accent/70 ring-2 ring-accent/40": focusedSegmentKey() === key }}>
+                <p class="text-[11px] font-semibold tracking-[0.14em] text-subtext uppercase">
+                  {formatTimestamp(segment.startMs)} - {formatTimestamp(segment.endMs)}
+                </p>
+                <p class="mt-1 text-sm text-text">{segment.text}</p>
+              </div>
+            );
+          }}
+        </For>
+      </div>
+    </Show>
   );
 }
 
@@ -357,15 +523,24 @@ export function DocumentView() {
               <article class="space-y-3 rounded-2xl border border-overlay bg-surface/35 p-4">
                 <p class="text-sm font-semibold text-text">Metadata</p>
                 <div class="flex flex-wrap items-center gap-2 text-[11px] text-subtext">
-                  <span class="rounded-full border border-overlay px-2 py-0.5">
-                    {formatDuration(currentDocument().durationSeconds)}
-                  </span>
+                  <Show when={!isTextSource(currentDocument().sourceType)}>
+                    <span class="rounded-full border border-overlay px-2 py-0.5">
+                      {formatDuration(currentDocument().durationSeconds)}
+                    </span>
+                  </Show>
                   <span class="rounded-full border border-overlay px-2 py-0.5">
                     {currentDocument().segments.length} segments
                   </span>
                   <span class="rounded-full border border-overlay px-2 py-0.5">
                     Created {formatDate(currentDocument().createdAt)}
                   </span>
+                  <Show when={sourceBadgeLabel(currentDocument().sourceType)}>
+                    {(label) => (
+                      <span class="rounded-full border border-accent/40 bg-accent/10 px-2 py-0.5 text-text">
+                        {label()}
+                      </span>
+                    )}
+                  </Show>
                 </div>
                 <label class="grid gap-1 text-xs text-subtext">
                   Title
@@ -463,38 +638,37 @@ export function DocumentView() {
                 </Show>
               </article>
 
-              <article class="rounded-2xl border border-overlay bg-surface/35 p-4">
-                <p class="text-xs text-subtext">Audio path: {currentDocument().audioPath ?? "N/A"}</p>
-                <p class="mt-1 text-xs text-subtext">SRT: {currentDocument().subtitleSrtPath ?? "N/A"}</p>
-                <p class="mt-1 text-xs text-subtext">VTT: {currentDocument().subtitleVttPath ?? "N/A"}</p>
-                <p class="mt-1 text-xs text-subtext">Updated: {formatDate(currentDocument().updatedAt)}</p>
-              </article>
+              <Show when={!isTextSource(currentDocument().sourceType)}>
+                <article class="rounded-2xl border border-overlay bg-surface/35 p-4">
+                  <p class="text-xs text-subtext">Audio path: {currentDocument().audioPath ?? "N/A"}</p>
+                  <p class="mt-1 text-xs text-subtext">SRT: {currentDocument().subtitleSrtPath ?? "N/A"}</p>
+                  <p class="mt-1 text-xs text-subtext">VTT: {currentDocument().subtitleVttPath ?? "N/A"}</p>
+                  <p class="mt-1 text-xs text-subtext">Updated: {formatDate(currentDocument().updatedAt)}</p>
+                </article>
+              </Show>
 
               <article class="rounded-2xl border border-overlay bg-surface/35 p-4">
-                <p class="mb-3 text-sm font-semibold text-text">Transcript</p>
-                <Show
-                  when={currentDocument().segments.length > 0}
-                  fallback={<p class="text-sm text-subtext">{currentDocument().transcript}</p>}>
-                  <div class="grid gap-2">
-                    <For each={currentDocument().segments}>
-                      {(segment) => {
-                        const key = segmentDomKey(segment);
-                        return (
-                          <div
-                            ref={(element) => {
-                              segmentElements.set(key, element);
-                            }}
-                            class="rounded-xl border border-overlay/80 bg-elevation/70 px-3 py-2 transition"
-                            classList={{ "!border-accent/70 ring-2 ring-accent/40": focusedSegmentKey() === key }}>
-                            <p class="text-[11px] font-semibold tracking-[0.14em] text-subtext uppercase">
-                              {formatTimestamp(segment.startMs)} - {formatTimestamp(segment.endMs)}
-                            </p>
-                            <p class="mt-1 text-sm text-text">{segment.text}</p>
-                          </div>
-                        );
-                      }}
-                    </For>
-                  </div>
+                <p class="mb-3 text-sm font-semibold text-text">
+                  {isTextSource(currentDocument().sourceType) ? "Content" : "Transcript"}
+                </p>
+                <Show when={isTextSource(currentDocument().sourceType)}>
+                  <Show
+                    when={isMarkdownSource(currentDocument())}
+                    fallback={
+                      <p class="text-sm leading-relaxed text-text whitespace-pre-wrap">
+                        {currentDocument().transcript}
+                      </p>
+                    }>
+                    {renderMarkdownBlocks(currentDocument().transcript)}
+                  </Show>
+                </Show>
+
+                <Show when={!isTextSource(currentDocument().sourceType)}>
+                  <DocumentSegments
+                    segments={currentDocument().segments}
+                    transcript={currentDocument().transcript}
+                    segmentElements={segmentElements}
+                    focusedSegmentKey={focusedSegmentKey()} />
                 </Show>
               </article>
             </>

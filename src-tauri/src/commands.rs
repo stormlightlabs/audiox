@@ -694,6 +694,86 @@ async fn process_document_ai(
     Ok((title, summary, tags, embedded_chunks))
 }
 
+fn fallback_title_from_text(raw_title: &str, content: &str, default_title: &str) -> String {
+    let explicit_title = raw_title.trim();
+    if !explicit_title.is_empty() {
+        return explicit_title.chars().take(120).collect::<String>();
+    }
+
+    let first_line = content
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or(default_title);
+    first_line.chars().take(120).collect::<String>()
+}
+
+async fn import_text_document(
+    app: &tauri::AppHandle, source_type: &str, source_uri: &str, fallback_title: &str, content: &str,
+) -> Result<models::ImportedDocument, String> {
+    let transcript = content.trim().to_string();
+    if transcript.is_empty() {
+        return Err("content must not be empty".to_string());
+    }
+
+    let segments = parsers::build_text_segments(&transcript);
+    if segments.is_empty() {
+        return Err("text import produced no segments".to_string());
+    }
+
+    let (app_data_dir, database_path) = managed_paths(app);
+    storage::ensure_directory_layout(&app_data_dir)?;
+    storage::initialize_database(&database_path)?;
+    let runtime_settings = load_runtime_settings(&database_path)?;
+
+    let (title, summary, tags, chunks) = process_document_ai(
+        app,
+        &transcript,
+        &segments,
+        fallback_title,
+        models::ProgressEvent::ImportMetadata,
+        runtime_settings.ollama_endpoint.as_str(),
+    )
+    .await?;
+    let keywords_csv = parsers::serialize_keywords_csv(&tags);
+
+    let document_id = Uuid::new_v4().to_string();
+    storage::persist_document(
+        &database_path,
+        &storage::PersistDocumentInput {
+            document_id: &document_id,
+            source_type,
+            title: &title,
+            summary: summary.as_deref(),
+            keywords_csv: keywords_csv.as_deref(),
+            source_uri,
+            transcript: &transcript,
+            audio_path: "",
+            subtitle_srt_path: "",
+            subtitle_vtt_path: "",
+            duration_seconds: 0,
+            segments: &segments,
+            chunks: &chunks,
+        },
+    )?;
+
+    Ok(models::ImportedDocument {
+        id: document_id,
+        source_type: source_type.to_string(),
+        source_uri: source_uri.to_string(),
+        title,
+        summary,
+        tags,
+        transcript,
+        audio_path: String::new(),
+        subtitle_srt_path: String::new(),
+        subtitle_vtt_path: String::new(),
+        duration_seconds: 0,
+        created_at: Utc::now().to_rfc3339(),
+        segments,
+    })
+}
+
 #[tauri::command]
 #[allow(clippy::needless_pass_by_value)]
 pub fn set_window_title(window: tauri::WebviewWindow, title: String) -> Result<(), String> {
@@ -1036,7 +1116,7 @@ pub fn list_documents(
         .map_err(|error| format!("failed to open database {}: {error}", database_path.display()))?;
     let mut statement = connection
         .prepare(
-            "SELECT id, title, summary, keywords, duration_seconds, created_at, updated_at
+            "SELECT id, source_type, title, summary, keywords, duration_seconds, created_at, updated_at
              FROM documents",
         )
         .map_err(|error| format!("failed to prepare list_documents query: {error}"))?;
@@ -1045,12 +1125,13 @@ pub fn list_documents(
         .query_map([], |row| {
             Ok(models::DocumentSummary {
                 id: row.get(0)?,
-                title: row.get(1)?,
-                summary: row.get(2)?,
-                tags: parsers::parse_keywords_csv(row.get::<_, Option<String>>(3)?.as_deref()),
-                duration_seconds: row.get(4)?,
-                created_at: row.get(5)?,
-                updated_at: row.get(6)?,
+                source_type: row.get(1)?,
+                title: row.get(2)?,
+                summary: row.get(3)?,
+                tags: parsers::parse_keywords_csv(row.get::<_, Option<String>>(4)?.as_deref()),
+                duration_seconds: row.get(5)?,
+                created_at: row.get(6)?,
+                updated_at: row.get(7)?,
             })
         })
         .map_err(|error| format!("failed to query documents: {error}"))?;
@@ -1087,24 +1168,26 @@ pub fn get_document(app: tauri::AppHandle, id: String) -> Result<models::Documen
 
     let mut document = connection
         .query_row(
-            "SELECT id, title, summary, keywords, COALESCE(transcript, ''), audio_path, subtitle_srt_path, subtitle_vtt_path,
-                    duration_seconds, created_at, updated_at
+            "SELECT id, source_type, source_uri, title, summary, keywords, COALESCE(transcript, ''), audio_path,
+                    subtitle_srt_path, subtitle_vtt_path, duration_seconds, created_at, updated_at
              FROM documents
              WHERE id = ?1",
             params![document_id],
             |row| {
                 Ok(models::DocumentDetail {
                     id: row.get(0)?,
-                    title: row.get(1)?,
-                    summary: row.get(2)?,
-                    tags: parsers::parse_keywords_csv(row.get::<_, Option<String>>(3)?.as_deref()),
-                    transcript: row.get(4)?,
-                    audio_path: row.get(5)?,
-                    subtitle_srt_path: row.get(6)?,
-                    subtitle_vtt_path: row.get(7)?,
-                    duration_seconds: row.get(8)?,
-                    created_at: row.get(9)?,
-                    updated_at: row.get(10)?,
+                    source_type: row.get(1)?,
+                    source_uri: row.get(2)?,
+                    title: row.get(3)?,
+                    summary: row.get(4)?,
+                    tags: parsers::parse_keywords_csv(row.get::<_, Option<String>>(5)?.as_deref()),
+                    transcript: row.get(6)?,
+                    audio_path: row.get(7)?,
+                    subtitle_srt_path: row.get(8)?,
+                    subtitle_vtt_path: row.get(9)?,
+                    duration_seconds: row.get(10)?,
+                    created_at: row.get(11)?,
+                    updated_at: row.get(12)?,
                     segments: Vec::new(),
                 })
             },
@@ -1837,6 +1920,8 @@ pub async fn import_audio_file(app: tauri::AppHandle, source_path: String) -> Re
     let created_at = Utc::now().to_rfc3339();
     Ok(models::ImportedDocument {
         id: document_id,
+        source_type: "file_import".to_string(),
+        source_uri,
         title,
         summary,
         tags,
@@ -1952,6 +2037,8 @@ pub async fn import_recorded_audio(
     let created_at = Utc::now().to_rfc3339();
     Ok(models::ImportedDocument {
         id: document_id,
+        source_type: "microphone_recording".to_string(),
+        source_uri,
         title,
         summary,
         tags,
@@ -1963,6 +2050,38 @@ pub async fn import_recorded_audio(
         created_at,
         segments,
     })
+}
+
+#[tauri::command]
+#[allow(clippy::needless_pass_by_value)]
+pub async fn import_text_note(app: tauri::AppHandle, source_path: String) -> Result<models::ImportedDocument, String> {
+    let source_trimmed = source_path.trim();
+    if source_trimmed.is_empty() {
+        return Err("source_path must not be empty".to_string());
+    }
+
+    let source = std::path::PathBuf::from(source_trimmed);
+    parsers::ensure_supported_text_import_path(&source)?;
+    let content = std::fs::read_to_string(&source)
+        .map_err(|error| format!("failed to read text source {}: {error}", source.display()))?;
+    let fallback_title = source
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .map(str::trim)
+        .filter(|stem| !stem.is_empty())
+        .unwrap_or("Imported note");
+    let source_uri = source.to_string_lossy().to_string();
+
+    import_text_document(&app, "text_note", &source_uri, fallback_title, &content).await
+}
+
+#[tauri::command]
+#[allow(clippy::needless_pass_by_value)]
+pub async fn import_text_content(
+    app: tauri::AppHandle, title: String, content: String,
+) -> Result<models::ImportedDocument, String> {
+    let fallback_title = fallback_title_from_text(&title, &content, "Pasted note");
+    import_text_document(&app, "text_paste", "text://pasted", &fallback_title, &content).await
 }
 
 #[tauri::command]

@@ -60,6 +60,8 @@ pub fn run() {
             commands::pull_ollama_model,
             commands::import_audio_file,
             commands::import_recorded_audio,
+            commands::import_text_note,
+            commands::import_text_content,
             commands::list_documents,
             commands::get_document,
             commands::update_document,

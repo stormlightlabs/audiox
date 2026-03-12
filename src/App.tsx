@@ -55,7 +55,7 @@ function windowTitleForPath(pathname: string): string {
     return "Audio X - Microphone Recording";
   }
   if (pathname === "/import") {
-    return "Audio X - Audio Import";
+    return "Audio X - Import";
   }
   if (pathname === "/library") {
     return "Audio X - Document Library";

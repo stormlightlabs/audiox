@@ -7,7 +7,8 @@ use std::collections::HashSet;
 use std::path::Path;
 
 use crate::models::{
-    OllamaModel, TranscriptSegment, ALLOWED_IMPORT_EXTENSIONS, REQUIRED_OLLAMA_MODELS, WHISPER_LANGUAGE_AUTO,
+    OllamaModel, TranscriptSegment, ALLOWED_IMPORT_EXTENSIONS, ALLOWED_TEXT_IMPORT_EXTENSIONS, REQUIRED_OLLAMA_MODELS,
+    WHISPER_LANGUAGE_AUTO,
 };
 
 pub fn parse_ollama_model_names(payload: &Value) -> Vec<String> {
@@ -214,6 +215,14 @@ pub fn extension_for_path(path: &Path) -> Option<String> {
 }
 
 pub fn ensure_supported_import_path(source_path: &Path) -> Result<(), String> {
+    ensure_supported_path_for_extensions(source_path, &ALLOWED_IMPORT_EXTENSIONS)
+}
+
+pub fn ensure_supported_text_import_path(source_path: &Path) -> Result<(), String> {
+    ensure_supported_path_for_extensions(source_path, &ALLOWED_TEXT_IMPORT_EXTENSIONS)
+}
+
+fn ensure_supported_path_for_extensions(source_path: &Path, allowed_extensions: &[&str]) -> Result<(), String> {
     if !source_path.is_file() {
         return Err(format!(
             "source file does not exist or is not a regular file: {}",
@@ -224,17 +233,26 @@ pub fn ensure_supported_import_path(source_path: &Path) -> Result<(), String> {
     let extension = extension_for_path(source_path)
         .ok_or_else(|| format!("unsupported import file extension for {}", source_path.display()))?;
 
-    if ALLOWED_IMPORT_EXTENSIONS
-        .iter()
-        .any(|candidate| *candidate == extension)
-    {
+    if allowed_extensions.iter().any(|candidate| *candidate == extension) {
         return Ok(());
     }
 
     Err(format!(
         "unsupported file extension '.{extension}'. Supported formats: {}",
-        ALLOWED_IMPORT_EXTENSIONS.join(", ")
+        allowed_extensions.join(", ")
     ))
+}
+
+pub fn build_text_segments(text: &str) -> Vec<TranscriptSegment> {
+    text.split("\n\n")
+        .map(|paragraph| paragraph.trim())
+        .filter(|paragraph| !paragraph.is_empty())
+        .enumerate()
+        .map(|(index, paragraph)| {
+            let start_ms = (index as i64) * 1000;
+            TranscriptSegment { start_ms, end_ms: start_ms + 999, text: paragraph.to_string() }
+        })
+        .collect()
 }
 
 pub fn parse_hms_to_ms(hours: i64, minutes: i64, seconds: f64) -> i64 {
@@ -571,5 +589,35 @@ mod tests {
         assert_eq!(chunks[0], "one two three");
         assert_eq!(chunks[1], "four five");
         assert_eq!(chunks[2], "six seven eight");
+    }
+
+    #[test]
+    fn text_segments_split_on_paragraphs_and_assign_virtual_timestamps() {
+        let segments = build_text_segments("Alpha paragraph.\n\nBeta paragraph.\n\n\nGamma paragraph.");
+
+        assert_eq!(segments.len(), 3);
+        assert_eq!(segments[0].start_ms, 0);
+        assert_eq!(segments[0].end_ms, 999);
+        assert_eq!(segments[0].text, "Alpha paragraph.");
+        assert_eq!(segments[1].start_ms, 1000);
+        assert_eq!(segments[1].end_ms, 1999);
+        assert_eq!(segments[1].text, "Beta paragraph.");
+        assert_eq!(segments[2].start_ms, 2000);
+        assert_eq!(segments[2].end_ms, 2999);
+        assert_eq!(segments[2].text, "Gamma paragraph.");
+    }
+
+    #[test]
+    fn supported_text_import_extensions_are_enforced() {
+        let temp_dir = std::env::temp_dir().join(format!("audiox-text-import-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&temp_dir).expect("temp directory should be created");
+        let markdown_path = temp_dir.join("note.md");
+        std::fs::write(&markdown_path, "# notes").expect("markdown fixture should be written");
+        assert!(ensure_supported_text_import_path(&markdown_path).is_ok());
+
+        let unsupported_path = temp_dir.join("note.pdf");
+        std::fs::write(&unsupported_path, "%PDF").expect("pdf fixture should be written");
+        assert!(ensure_supported_text_import_path(&unsupported_path).is_err());
+        let _ = std::fs::remove_dir_all(temp_dir);
     }
 }

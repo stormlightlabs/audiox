@@ -109,6 +109,7 @@ pub const WHISPER_DEFAULTS: WhisperDefaults = WhisperDefaults { model_name: "bas
 /// ~512 token chunks (rough approximation: ~0.75 words/token for English prose).
 pub const EMBEDDING_CHUNK_TARGET_WORDS: usize = 384;
 pub const ALLOWED_IMPORT_EXTENSIONS: [&str; 7] = ["mp3", "m4a", "wav", "flac", "ogg", "opus", "webm"];
+pub const ALLOWED_TEXT_IMPORT_EXTENSIONS: [&str; 2] = ["txt", "md"];
 
 pub enum SearchLimit {
     Default,
@@ -294,6 +295,8 @@ pub struct TranscriptSegment {
 #[serde(rename_all = "camelCase")]
 pub struct ImportedDocument {
     pub id: String,
+    pub source_type: String,
+    pub source_uri: String,
     pub title: String,
     pub summary: Option<String>,
     pub tags: Vec<String>,
@@ -310,6 +313,7 @@ pub struct ImportedDocument {
 #[serde(rename_all = "camelCase")]
 pub struct DocumentSummary {
     pub id: String,
+    pub source_type: String,
     pub title: String,
     pub summary: Option<String>,
     pub tags: Vec<String>,
@@ -322,6 +326,8 @@ pub struct DocumentSummary {
 #[serde(rename_all = "camelCase")]
 pub struct DocumentDetail {
     pub id: String,
+    pub source_type: String,
+    pub source_uri: Option<String>,
     pub title: String,
     pub summary: Option<String>,
     pub tags: Vec<String>,
