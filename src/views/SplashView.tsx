@@ -98,7 +98,7 @@ function GuidancePanel(props: { messages: string[] }) {
 
 export function SplashView() {
   const navigate = useNavigate();
-  const { state, runPreflight } = useAppContext();
+  const { state, runPreflight, completeStartupFlow } = useAppContext();
 
   const currentRunningIndex = () => {
     if (state.preflightPhase !== "running") {
@@ -114,13 +114,18 @@ export function SplashView() {
     }
 
     let timeoutId: ReturnType<typeof setTimeout> | undefined;
+    if (!state.startupFlowActive) {
+      return;
+    }
+
     if (preflight.should_open_setup) {
       timeoutId = setTimeout(() => {
-        void navigate("/setup", { replace: true });
+        void navigate("/setup");
       }, 900);
     } else if (preflight.all_required_passed) {
       timeoutId = setTimeout(() => {
-        void navigate("/library", { replace: true });
+        completeStartupFlow();
+        void navigate("/library");
       }, 700);
     }
 

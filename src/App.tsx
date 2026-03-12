@@ -113,6 +113,7 @@ function App() {
       <Route path="/import" component={ImportView} />
       <Route path="/library" component={LibraryView} />
       <Route path="/document" component={DocumentView} />
+      <Route path="/document/:id" component={DocumentView} />
       <Route path="/settings" component={SettingsView} />
     </Router>
   );

@@ -83,6 +83,24 @@ describe("Preflight flow", () => {
     });
   });
 
+  it("allows revisiting splash without auto-redirect after initial startup completion", async () => {
+    const user = userEvent.setup();
+    invokeMock.mockResolvedValue(successfulPreflight);
+    render(() => <App />);
+
+    await waitFor(() => expect(screen.getByRole("heading", { name: "Document library" })).toBeInTheDocument(), {
+      timeout: 2500,
+    });
+
+    await user.click(screen.getByRole("link", { name: "Splash" }));
+    expect(await screen.findByText("Startup Preflight")).toBeInTheDocument();
+
+    await new Promise((resolve) => {
+      setTimeout(resolve, 1100);
+    });
+    expect(globalThis.location.pathname).toBe("/splash");
+  });
+
   it("stays on splash with guidance when required checks fail and supports retry", async () => {
     const user = userEvent.setup();
     invokeMock.mockResolvedValueOnce(failingPreflight).mockResolvedValueOnce(successfulPreflight);

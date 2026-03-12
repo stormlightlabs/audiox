@@ -224,7 +224,7 @@ function GuidancePanel(props: { guidance: string[] }) {
 
 export function SetupView() {
   const navigate = useNavigate();
-  const { runPreflight } = useAppContext();
+  const { runPreflight, state, completeStartupFlow } = useAppContext();
   const [phase, setPhase] = createSignal<SetupPhase>("checking");
   const [error, setError] = createSignal<string | null>(null);
   const [setupStatus, setSetupStatus] = createSignal<SetupStatus | null>(null);
@@ -296,7 +296,8 @@ export function SetupView() {
     setPhase("completed");
     const result = await runPreflight();
     if (result?.all_required_passed) {
-      await navigate("/library", { replace: true });
+      completeStartupFlow();
+      await navigate("/library");
       return;
     }
     setError("Setup completed, but preflight still has required failures. Review Splash guidance and retry.");
@@ -385,7 +386,7 @@ export function SetupView() {
           setSteps(stepKey, "message", event.payload.message);
           setSteps(stepKey, "progress", event.payload.percent);
         });
-      } catch {
+      } catch (error) {
         logger.warn("Events are unavailable in plain browser contexts.");
         logger.error("error, preflight check failure", {
           keyValues: { error: error instanceof Error ? error.message : String(error) },
@@ -393,7 +394,7 @@ export function SetupView() {
       }
 
       const status = await refreshSetup();
-      if (status?.all_required_ready) {
+      if (status?.all_required_ready && state.startupFlowActive) {
         await completeSetupFlow();
       }
     })();

@@ -15,19 +15,24 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 use tauri::{Emitter, Manager};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 use uuid::Uuid;
 
 const REQUIRED_DIRECTORIES: [&str; 6] = ["models", "audio", "video", "subtitles", "db", "bin"];
 const REQUIRED_OLLAMA_MODELS: [&str; 2] = ["nomic-embed-text", "gemma3:4b"];
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 const PREFLIGHT_EVENT: &str = "preflight://check";
 const SETUP_WHISPER_PROGRESS_EVENT: &str = "setup://whisper-progress";
 const SETUP_OLLAMA_PROGRESS_EVENT: &str = "setup://ollama-progress";
+const IMPORT_CONVERSION_PROGRESS_EVENT: &str = "import://conversion-progress";
+const IMPORT_TRANSCRIPTION_PROGRESS_EVENT: &str = "import://transcription-progress";
 const OLLAMA_TAGS_URL: &str = "http://localhost:11434/api/tags";
 const OLLAMA_PULL_URL: &str = "http://localhost:11434/api/pull";
 const DEFAULT_WHISPER_MODEL_NAME: &str = "base.en";
+const DEFAULT_WHISPER_THREADS: usize = 4;
 const COMMAND_TIMEOUT_SECONDS: u64 = 8;
 const DOWNLOAD_TIMEOUT_SECONDS: u64 = 120;
+const ALLOWED_IMPORT_EXTENSIONS: [&str; 7] = ["mp3", "m4a", "wav", "flac", "ogg", "opus", "webm"];
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -109,6 +114,73 @@ struct OllamaPullProgress {
     completed: u64,
     total: u64,
     percent: f64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ConversionProgress {
+    status: String,
+    message: String,
+    out_time_ms: i64,
+    total_duration_ms: Option<i64>,
+    percent: f64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TranscriptionProgress {
+    status: String,
+    message: String,
+    percent: f64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TranscriptSegment {
+    start_ms: i64,
+    end_ms: i64,
+    text: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ImportedDocument {
+    id: String,
+    title: String,
+    transcript: String,
+    audio_path: String,
+    subtitle_srt_path: String,
+    subtitle_vtt_path: String,
+    duration_seconds: i64,
+    created_at: String,
+    segments: Vec<TranscriptSegment>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DocumentSummary {
+    id: String,
+    title: String,
+    summary: Option<String>,
+    duration_seconds: Option<i64>,
+    created_at: String,
+    updated_at: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DocumentDetail {
+    id: String,
+    title: String,
+    summary: Option<String>,
+    transcript: String,
+    audio_path: Option<String>,
+    subtitle_srt_path: Option<String>,
+    subtitle_vtt_path: Option<String>,
+    duration_seconds: Option<i64>,
+    created_at: String,
+    updated_at: String,
+    segments: Vec<TranscriptSegment>,
 }
 
 impl Default for PreflightResult {
@@ -252,6 +324,52 @@ fn parse_setting_bool(value: Option<String>) -> bool {
         .unwrap_or(false)
 }
 
+fn has_column(connection: &Connection, table: &str, column: &str) -> Result<bool, String> {
+    let mut statement = connection
+        .prepare(&format!("PRAGMA table_info({table})"))
+        .map_err(|error| format!("failed to inspect table '{table}': {error}"))?;
+
+    let mut rows = statement
+        .query([])
+        .map_err(|error| format!("failed to query table info for '{table}': {error}"))?;
+    while let Some(row) = rows
+        .next()
+        .map_err(|error| format!("failed while reading table info for '{table}': {error}"))?
+    {
+        let name: String = row
+            .get(1)
+            .map_err(|error| format!("failed to read column metadata for '{table}': {error}"))?;
+        if name == column {
+            return Ok(true);
+        }
+    }
+
+    Ok(false)
+}
+
+fn ensure_documents_table_columns(connection: &Connection) -> Result<(), String> {
+    let required_columns = [
+        ("audio_path", "TEXT"),
+        ("subtitle_srt_path", "TEXT"),
+        ("subtitle_vtt_path", "TEXT"),
+    ];
+
+    for (column_name, definition) in required_columns {
+        if has_column(connection, "documents", column_name)? {
+            continue;
+        }
+
+        connection
+            .execute(
+                &format!("ALTER TABLE documents ADD COLUMN {column_name} {definition}"),
+                [],
+            )
+            .map_err(|error| format!("failed to add documents.{column_name}: {error}"))?;
+    }
+
+    Ok(())
+}
+
 fn database_path_from_app_data(app_data_dir: &Path) -> PathBuf {
     app_data_dir.join("db").join("audiox.db")
 }
@@ -294,6 +412,9 @@ fn initialize_database(database_path: &Path) -> Result<(), String> {
             title TEXT NOT NULL DEFAULT '',
             summary TEXT,
             transcript TEXT,
+            audio_path TEXT,
+            subtitle_srt_path TEXT,
+            subtitle_vtt_path TEXT,
             duration_seconds INTEGER,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
@@ -311,6 +432,8 @@ fn initialize_database(database_path: &Path) -> Result<(), String> {
         ",
         )
         .map_err(|error| format!("failed to initialize schema: {error}"))?;
+
+    ensure_documents_table_columns(&connection)?;
 
     connection
         .execute(
@@ -672,7 +795,7 @@ fn non_download_guidance(spec: &RuntimeBinarySpec) -> String {
     )
 }
 
-async fn try_sidecar_binary(spec: &RuntimeBinarySpec) -> Result<Option<String>, String> {
+async fn try_sidecar_binary(spec: &RuntimeBinarySpec) -> Result<Option<PathBuf>, String> {
     let mut errors = Vec::new();
     for candidate in sidecar_candidate_paths(spec) {
         if !candidate.is_file() {
@@ -682,11 +805,7 @@ async fn try_sidecar_binary(spec: &RuntimeBinarySpec) -> Result<Option<String>, 
         let display = candidate.display().to_string();
         match execute_version_command(&candidate, &display, spec.version_args).await {
             Ok(()) => {
-                return Ok(Some(format!(
-                    "{} sidecar is available at {}.",
-                    spec.display_name,
-                    candidate.display()
-                )));
+                return Ok(Some(candidate));
             }
             Err(error) => errors.push(format!("{display}: {error}")),
         }
@@ -703,9 +822,18 @@ async fn try_sidecar_binary(spec: &RuntimeBinarySpec) -> Result<Option<String>, 
     Ok(None)
 }
 
-async fn ensure_runtime_binary(app_data_dir: &Path, spec: &RuntimeBinarySpec) -> Result<String, String> {
-    if let Some(sidecar_message) = try_sidecar_binary(spec).await? {
-        return Ok(sidecar_message);
+#[derive(Clone, Debug)]
+struct ResolvedBinary {
+    program: String,
+    message: String,
+}
+
+async fn resolve_runtime_binary(app_data_dir: &Path, spec: &RuntimeBinarySpec) -> Result<ResolvedBinary, String> {
+    if let Some(sidecar_path) = try_sidecar_binary(spec).await? {
+        return Ok(ResolvedBinary {
+            program: sidecar_path.display().to_string(),
+            message: format!("{} sidecar is available at {}.", spec.display_name, sidecar_path.display()),
+        });
     }
 
     let binary_path = managed_binary_path(app_data_dir, spec);
@@ -713,18 +841,17 @@ async fn ensure_runtime_binary(app_data_dir: &Path, spec: &RuntimeBinarySpec) ->
     if binary_path.is_file() {
         let label = binary_path.display().to_string();
         execute_version_command(&binary_path, &label, spec.version_args).await?;
-        return Ok(format!(
-            "{} is available at {}.",
-            spec.display_name,
-            binary_path.display()
-        ));
+        return Ok(ResolvedBinary {
+            program: binary_path.display().to_string(),
+            message: format!("{} is available at {}.", spec.display_name, binary_path.display()),
+        });
     }
 
     if let Some(system_binary) = try_system_binary(spec).await {
-        return Ok(format!(
-            "{} is available on PATH as '{system_binary}'.",
-            spec.display_name
-        ));
+        return Ok(ResolvedBinary {
+            program: system_binary.clone(),
+            message: format!("{} is available on PATH as '{system_binary}'.", spec.display_name),
+        });
     }
 
     if !spec.allow_runtime_download {
@@ -748,12 +875,25 @@ async fn ensure_runtime_binary(app_data_dir: &Path, spec: &RuntimeBinarySpec) ->
     execute_version_command(&binary_path, &label, spec.version_args).await?;
 
     let installed_sha256 = sha256_hex_for_file(&binary_path)?;
-    Ok(format!(
-        "Downloaded {} to {} (sha256: {}).",
-        spec.display_name,
-        binary_path.display(),
-        installed_sha256
-    ))
+    Ok(ResolvedBinary {
+        program: binary_path.display().to_string(),
+        message: format!(
+            "Downloaded {} to {} (sha256: {}).",
+            spec.display_name,
+            binary_path.display(),
+            installed_sha256
+        ),
+    })
+}
+
+async fn resolve_runtime_binary_program(app_data_dir: &Path, spec: &RuntimeBinarySpec) -> Result<String, String> {
+    let resolved = resolve_runtime_binary(app_data_dir, spec).await?;
+    Ok(resolved.program)
+}
+
+async fn ensure_runtime_binary(app_data_dir: &Path, spec: &RuntimeBinarySpec) -> Result<String, String> {
+    let resolved = resolve_runtime_binary(app_data_dir, spec).await?;
+    Ok(resolved.message)
 }
 
 fn whisper_model_present(models_dir: &Path) -> Result<bool, String> {
@@ -1115,6 +1255,529 @@ fn compute_all_required_passed(result: &PreflightResult) -> bool {
     .contains(&CheckStatus::Fail)
 }
 
+fn extension_for_path(path: &Path) -> Option<String> {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| extension.trim().to_ascii_lowercase())
+}
+
+fn ensure_supported_import_path(source_path: &Path) -> Result<(), String> {
+    if !source_path.is_file() {
+        return Err(format!(
+            "source file does not exist or is not a regular file: {}",
+            source_path.display()
+        ));
+    }
+
+    let extension = extension_for_path(source_path)
+        .ok_or_else(|| format!("unsupported import file extension for {}", source_path.display()))?;
+
+    if ALLOWED_IMPORT_EXTENSIONS
+        .iter()
+        .any(|candidate| *candidate == extension)
+    {
+        return Ok(());
+    }
+
+    Err(format!(
+        "unsupported file extension '.{extension}'. Supported formats: {}",
+        ALLOWED_IMPORT_EXTENSIONS.join(", ")
+    ))
+}
+
+fn parse_hms_to_ms(hours: i64, minutes: i64, seconds: f64) -> i64 {
+    let whole_seconds = seconds.trunc() as i64;
+    let milliseconds = ((seconds - seconds.trunc()) * 1000.0).round() as i64;
+    (hours * 3_600_000) + (minutes * 60_000) + (whole_seconds * 1000) + milliseconds
+}
+
+fn parse_clock_timestamp_to_ms(value: &str) -> Option<i64> {
+    let mut parts = value.split(':');
+    let hours = parts.next()?.trim().parse::<i64>().ok()?;
+    let minutes = parts.next()?.trim().parse::<i64>().ok()?;
+    let seconds = parts
+        .next()?
+        .trim()
+        .replace(',', ".")
+        .parse::<f64>()
+        .ok()?;
+    if parts.next().is_some() {
+        return None;
+    }
+
+    Some(parse_hms_to_ms(hours, minutes, seconds))
+}
+
+fn parse_ffmpeg_duration_ms(payload: &str) -> Option<i64> {
+    let duration_regex = Regex::new(r"Duration:\s+(\d{2}):(\d{2}):(\d{2}(?:\.\d+)?)").ok()?;
+    let captures = duration_regex.captures(payload)?;
+    let hours = captures.get(1)?.as_str().parse::<i64>().ok()?;
+    let minutes = captures.get(2)?.as_str().parse::<i64>().ok()?;
+    let seconds = captures.get(3)?.as_str().parse::<f64>().ok()?;
+    Some(parse_hms_to_ms(hours, minutes, seconds))
+}
+
+fn parse_ffmpeg_out_time_ms(value: &str) -> Option<i64> {
+    if let Ok(raw) = value.trim().parse::<i64>() {
+        if raw > 10_000_000 {
+            return Some(raw / 1000);
+        }
+        return Some(raw);
+    }
+
+    parse_clock_timestamp_to_ms(value.trim())
+}
+
+fn emit_conversion_progress(
+    app: &tauri::AppHandle, status: &str, message: impl Into<String>, out_time_ms: i64, total_duration_ms: Option<i64>,
+) {
+    let percent = total_duration_ms
+        .map(|total| calculate_percent(u64::try_from(out_time_ms.max(0)).unwrap_or_default(), total as u64))
+        .unwrap_or(0.0);
+
+    let payload = ConversionProgress {
+        status: status.to_string(),
+        message: message.into(),
+        out_time_ms,
+        total_duration_ms,
+        percent,
+    };
+    let _ = app.emit(IMPORT_CONVERSION_PROGRESS_EVENT, payload);
+}
+
+fn emit_transcription_progress(app: &tauri::AppHandle, status: &str, message: impl Into<String>, percent: f64) {
+    let payload = TranscriptionProgress {
+        status: status.to_string(),
+        message: message.into(),
+        percent: percent.clamp(0.0, 100.0),
+    };
+    let _ = app.emit(IMPORT_TRANSCRIPTION_PROGRESS_EVENT, payload);
+}
+
+async fn probe_ffmpeg_duration_ms(ffmpeg_program: &str, input_path: &Path) -> Result<Option<i64>, String> {
+    let mut command = tokio::process::Command::new(ffmpeg_program);
+    command.arg("-i").arg(input_path);
+    command.stdout(Stdio::piped());
+    command.stderr(Stdio::piped());
+
+    let output = tokio::time::timeout(Duration::from_secs(COMMAND_TIMEOUT_SECONDS), command.output())
+        .await
+        .map_err(|_| format!("timed out while probing media duration for {}", input_path.display()))?
+        .map_err(|error| format!("failed to run ffmpeg duration probe: {error}"))?;
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    Ok(parse_ffmpeg_duration_ms(&format!("{stderr}\n{stdout}")))
+}
+
+async fn run_ffmpeg_conversion(
+    app: &tauri::AppHandle, ffmpeg_program: &str, input_path: &Path, output_path: &Path,
+) -> Result<(), String> {
+    let total_duration_ms = probe_ffmpeg_duration_ms(ffmpeg_program, input_path).await?;
+    emit_conversion_progress(
+        app,
+        "running",
+        format!("Converting {} to 16kHz mono WAV...", input_path.display()),
+        0,
+        total_duration_ms,
+    );
+
+    let mut command = tokio::process::Command::new(ffmpeg_program);
+    command
+        .arg("-i")
+        .arg(input_path)
+        .arg("-ar")
+        .arg("16000")
+        .arg("-ac")
+        .arg("1")
+        .arg("-c:a")
+        .arg("pcm_s16le")
+        .arg("-progress")
+        .arg("pipe:1")
+        .arg("-nostats")
+        .arg("-y")
+        .arg(output_path);
+    command.stdout(Stdio::piped());
+    command.stderr(Stdio::piped());
+
+    let mut child = command
+        .spawn()
+        .map_err(|error| format!("failed to start ffmpeg conversion: {error}"))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "ffmpeg conversion did not provide stdout".to_string())?;
+    let mut stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| "ffmpeg conversion did not provide stderr".to_string())?;
+
+    let stderr_task = tokio::spawn(async move {
+        let mut collected = String::new();
+        stderr
+            .read_to_string(&mut collected)
+            .await
+            .map_err(|error| format!("failed to read ffmpeg stderr: {error}"))?;
+        Ok::<String, String>(collected)
+    });
+
+    let mut latest_out_time_ms = 0_i64;
+    let mut lines = BufReader::new(stdout).lines();
+    while let Some(line) = lines
+        .next_line()
+        .await
+        .map_err(|error| format!("failed to read ffmpeg progress: {error}"))?
+    {
+        let trimmed = line.trim();
+        if let Some(value) = trimmed.strip_prefix("out_time_ms=") {
+            if let Some(out_time_ms) = parse_ffmpeg_out_time_ms(value) {
+                latest_out_time_ms = out_time_ms.max(latest_out_time_ms);
+                emit_conversion_progress(
+                    app,
+                    "running",
+                    "Converting audio with ffmpeg...",
+                    latest_out_time_ms,
+                    total_duration_ms,
+                );
+            }
+            continue;
+        }
+
+        if let Some(value) = trimmed.strip_prefix("out_time=") {
+            if let Some(out_time_ms) = parse_ffmpeg_out_time_ms(value) {
+                latest_out_time_ms = out_time_ms.max(latest_out_time_ms);
+                emit_conversion_progress(
+                    app,
+                    "running",
+                    "Converting audio with ffmpeg...",
+                    latest_out_time_ms,
+                    total_duration_ms,
+                );
+            }
+            continue;
+        }
+
+        if trimmed == "progress=end" {
+            let final_out_time = total_duration_ms.unwrap_or(latest_out_time_ms);
+            emit_conversion_progress(
+                app,
+                "completed",
+                format!("Audio conversion complete: {}", output_path.display()),
+                final_out_time,
+                total_duration_ms.or(Some(final_out_time)),
+            );
+        }
+    }
+
+    let status = child
+        .wait()
+        .await
+        .map_err(|error| format!("failed waiting for ffmpeg conversion: {error}"))?;
+    let stderr_output = stderr_task
+        .await
+        .map_err(|error| format!("ffmpeg stderr task failed: {error}"))??;
+
+    if !status.success() {
+        emit_conversion_progress(app, "error", "Audio conversion failed.", latest_out_time_ms, total_duration_ms);
+        return Err(format!(
+            "ffmpeg conversion failed: {}",
+            summarize_command_output(stderr_output.as_bytes(), &[])
+        ));
+    }
+
+    Ok(())
+}
+
+fn parse_progress_percent(line: &str) -> Option<f64> {
+    let captures = Regex::new(r"(\d{1,3}(?:\.\d+)?)%").ok()?.captures(line)?;
+    let raw = captures.get(1)?.as_str().parse::<f64>().ok()?;
+    Some(raw.clamp(0.0, 100.0))
+}
+
+fn value_to_i64(value: &Value) -> Option<i64> {
+    value
+        .as_i64()
+        .or_else(|| value.as_u64().and_then(|number| i64::try_from(number).ok()))
+        .or_else(|| value.as_f64().map(|number| number.round() as i64))
+}
+
+fn parse_transcript_segment(item: &Value) -> Option<TranscriptSegment> {
+    let text = item
+        .get("text")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or("")
+        .to_string();
+    if text.is_empty() {
+        return None;
+    }
+
+    let from_offset = item.get("offsets").and_then(|offsets| offsets.get("from")).and_then(value_to_i64);
+    let to_offset = item.get("offsets").and_then(|offsets| offsets.get("to")).and_then(value_to_i64);
+    let from_timestamp = item
+        .get("timestamps")
+        .and_then(|timestamps| timestamps.get("from"))
+        .and_then(Value::as_str)
+        .and_then(parse_clock_timestamp_to_ms);
+    let to_timestamp = item
+        .get("timestamps")
+        .and_then(|timestamps| timestamps.get("to"))
+        .and_then(Value::as_str)
+        .and_then(parse_clock_timestamp_to_ms);
+
+    let from_seconds = item
+        .get("start")
+        .and_then(Value::as_f64)
+        .map(|seconds| (seconds * 1000.0).round() as i64);
+    let to_seconds = item
+        .get("end")
+        .and_then(Value::as_f64)
+        .map(|seconds| (seconds * 1000.0).round() as i64);
+
+    let start_ms = from_offset.or(from_timestamp).or(from_seconds)?;
+    let mut end_ms = to_offset.or(to_timestamp).or(to_seconds).unwrap_or(start_ms);
+    if end_ms < start_ms {
+        end_ms = start_ms;
+    }
+
+    Some(TranscriptSegment { start_ms, end_ms, text })
+}
+
+fn parse_whisper_segments(payload: &Value) -> Vec<TranscriptSegment> {
+    let candidate_arrays = [
+        payload.get("transcription").and_then(Value::as_array),
+        payload.get("segments").and_then(Value::as_array),
+    ];
+
+    let mut segments = candidate_arrays
+        .into_iter()
+        .flatten()
+        .flat_map(|entries| entries.iter())
+        .filter_map(parse_transcript_segment)
+        .collect::<Vec<_>>();
+
+    segments.sort_by_key(|segment| (segment.start_ms, segment.end_ms));
+    segments
+}
+
+fn build_transcript_text(segments: &[TranscriptSegment]) -> String {
+    let mut transcript = String::new();
+    for segment in segments {
+        if transcript.is_empty() {
+            transcript.push_str(segment.text.trim());
+            continue;
+        }
+        transcript.push(' ');
+        transcript.push_str(segment.text.trim());
+    }
+    transcript
+}
+
+fn max_duration_seconds(segments: &[TranscriptSegment]) -> i64 {
+    let max_end_ms = segments.iter().map(|segment| segment.end_ms).max().unwrap_or(0);
+    ((max_end_ms as f64) / 1000.0).ceil() as i64
+}
+
+fn path_for_storage(path: &Path, app_data_dir: &Path) -> String {
+    if let Ok(relative) = path.strip_prefix(app_data_dir) {
+        return relative.to_string_lossy().to_string();
+    }
+    path.to_string_lossy().to_string()
+}
+
+fn resolve_whisper_model_path(app_data_dir: &Path) -> Result<PathBuf, String> {
+    let model_dir = app_data_dir.join("models");
+    let preferred = model_dir.join(whisper_model_file_name(DEFAULT_WHISPER_MODEL_NAME));
+    if preferred.is_file() {
+        return Ok(preferred);
+    }
+
+    let entries =
+        fs::read_dir(&model_dir).map_err(|error| format!("failed to read models directory {}: {error}", model_dir.display()))?;
+    for entry in entries {
+        let path = entry
+            .map_err(|error| format!("failed to inspect models directory {}: {error}", model_dir.display()))?
+            .path();
+        if path.is_file()
+            && path
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("bin"))
+        {
+            return Ok(path);
+        }
+    }
+
+    Err(format!(
+        "no whisper model file found in {}. Run setup to download {}.",
+        model_dir.display(),
+        whisper_model_file_name(DEFAULT_WHISPER_MODEL_NAME)
+    ))
+}
+
+async fn run_whisper_transcription(
+    app: &tauri::AppHandle, whisper_program: &str, model_path: &Path, wav_path: &Path, output_base: &Path,
+) -> Result<Vec<TranscriptSegment>, String> {
+    emit_transcription_progress(
+        app,
+        "running",
+        format!("Transcribing {} with whisper-cli...", wav_path.display()),
+        0.0,
+    );
+
+    let mut command = tokio::process::Command::new(whisper_program);
+    command
+        .arg("-m")
+        .arg(model_path)
+        .arg("-f")
+        .arg(wav_path)
+        .arg("-oj")
+        .arg("-osrt")
+        .arg("-ovtt")
+        .arg("-of")
+        .arg(output_base)
+        .arg("-l")
+        .arg("auto")
+        .arg("-t")
+        .arg(DEFAULT_WHISPER_THREADS.to_string())
+        .arg("-pp");
+    command.stdout(Stdio::piped());
+    command.stderr(Stdio::piped());
+
+    let mut child = command
+        .spawn()
+        .map_err(|error| format!("failed to start whisper-cli transcription: {error}"))?;
+    let mut stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "whisper-cli transcription did not provide stdout".to_string())?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| "whisper-cli transcription did not provide stderr".to_string())?;
+
+    let stdout_task = tokio::spawn(async move {
+        let mut collected = String::new();
+        stdout
+            .read_to_string(&mut collected)
+            .await
+            .map_err(|error| format!("failed to read whisper stdout: {error}"))?;
+        Ok::<String, String>(collected)
+    });
+
+    let mut stderr_lines = BufReader::new(stderr).lines();
+    let mut stderr_output = String::new();
+    let mut highest_progress = 0.0;
+    while let Some(line) = stderr_lines
+        .next_line()
+        .await
+        .map_err(|error| format!("failed to read whisper progress output: {error}"))?
+    {
+        let trimmed = line.trim();
+        if !trimmed.is_empty() {
+            stderr_output.push_str(trimmed);
+            stderr_output.push('\n');
+            if let Some(percent) = parse_progress_percent(trimmed) {
+                if percent > highest_progress {
+                    highest_progress = percent;
+                }
+                emit_transcription_progress(app, "running", "Transcribing audio with whisper-cli...", highest_progress);
+            }
+        }
+    }
+
+    let status = child
+        .wait()
+        .await
+        .map_err(|error| format!("failed while waiting for whisper-cli: {error}"))?;
+    let stdout_output = stdout_task
+        .await
+        .map_err(|error| format!("whisper stdout task failed: {error}"))??;
+
+    if !status.success() {
+        emit_transcription_progress(app, "error", "Transcription failed.", highest_progress);
+        return Err(format!(
+            "whisper-cli transcription failed: {}",
+            summarize_command_output(stderr_output.as_bytes(), stdout_output.as_bytes())
+        ));
+    }
+
+    let json_path = output_base.with_extension("json");
+    let json_payload = fs::read_to_string(&json_path)
+        .map_err(|error| format!("failed to read whisper JSON output at {}: {error}", json_path.display()))?;
+    let parsed = serde_json::from_str::<Value>(&json_payload)
+        .map_err(|error| format!("failed to parse whisper JSON output {}: {error}", json_path.display()))?;
+
+    let segments = parse_whisper_segments(&parsed);
+    emit_transcription_progress(
+        app,
+        "completed",
+        format!("Transcription complete. {} segments generated.", segments.len()),
+        100.0,
+    );
+    Ok(segments)
+}
+
+fn persist_document(
+    database_path: &Path, document_id: &str, title: &str, source_uri: &str, transcript: &str, audio_path: &str,
+    subtitle_srt_path: &str, subtitle_vtt_path: &str, duration_seconds: i64, segments: &[TranscriptSegment],
+) -> Result<(), String> {
+    let connection = Connection::open(database_path)
+        .map_err(|error| format!("failed to open database {}: {error}", database_path.display()))?;
+    let transaction = connection
+        .unchecked_transaction()
+        .map_err(|error| format!("failed to start persistence transaction: {error}"))?;
+
+    let now = Utc::now().to_rfc3339();
+    transaction
+        .execute(
+            "INSERT INTO documents (
+                id, source_type, source_uri, title, summary, transcript, audio_path, subtitle_srt_path, subtitle_vtt_path,
+                duration_seconds, created_at, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            params![
+                document_id,
+                "file_import",
+                source_uri,
+                title,
+                Option::<String>::None,
+                transcript,
+                audio_path,
+                subtitle_srt_path,
+                subtitle_vtt_path,
+                duration_seconds,
+                now,
+                now
+            ],
+        )
+        .map_err(|error| format!("failed to insert document {document_id}: {error}"))?;
+
+    let mut statement = transaction
+        .prepare(
+            "INSERT INTO document_segments (id, document_id, start_ms, end_ms, text, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        )
+        .map_err(|error| format!("failed to prepare segment insert statement: {error}"))?;
+    for segment in segments {
+        statement
+            .execute(params![
+                Uuid::new_v4().to_string(),
+                document_id,
+                segment.start_ms,
+                segment.end_ms,
+                segment.text,
+                now
+            ])
+            .map_err(|error| format!("failed to insert document segment for {document_id}: {error}"))?;
+    }
+
+    drop(statement);
+    transaction
+        .commit()
+        .map_err(|error| format!("failed to commit document transaction for {document_id}: {error}"))?;
+    Ok(())
+}
+
 #[tauri::command]
 #[allow(clippy::needless_pass_by_value)]
 async fn check_setup(app: tauri::AppHandle) -> Result<SetupStatus, String> {
@@ -1249,6 +1912,217 @@ async fn pull_ollama_model(app: tauri::AppHandle, model: String) -> Result<(), S
     );
 
     Ok(())
+}
+
+#[tauri::command]
+#[allow(clippy::needless_pass_by_value)]
+async fn import_audio_file(app: tauri::AppHandle, source_path: String) -> Result<ImportedDocument, String> {
+    let source_trimmed = source_path.trim();
+    if source_trimmed.is_empty() {
+        return Err("source_path must not be empty".to_string());
+    }
+
+    let source = PathBuf::from(source_trimmed);
+    ensure_supported_import_path(&source)?;
+
+    let app_data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| format!("failed to resolve app data directory: {error}"))?;
+    ensure_directory_layout(&app_data_dir)?;
+    let database_path = database_path_from_app_data(&app_data_dir);
+    initialize_database(&database_path)?;
+
+    let ffmpeg_program = resolve_runtime_binary_program(&app_data_dir, &FFMPEG_BINARY_SPEC).await?;
+    let whisper_program = resolve_runtime_binary_program(&app_data_dir, &WHISPER_BINARY_SPEC).await?;
+    let model_path = resolve_whisper_model_path(&app_data_dir)?;
+
+    let document_id = Uuid::new_v4().to_string();
+    let extension =
+        extension_for_path(&source).ok_or_else(|| format!("failed to determine extension for {}", source.display()))?;
+    let copied_source_path = app_data_dir
+        .join("audio")
+        .join(format!("{document_id}-source.{extension}"));
+    fs::copy(&source, &copied_source_path)
+        .map_err(|error| format!("failed to copy source audio into app data: {error}"))?;
+
+    let converted_wav_path = app_data_dir.join("audio").join(format!("{document_id}.wav"));
+    run_ffmpeg_conversion(&app, &ffmpeg_program, &copied_source_path, &converted_wav_path).await?;
+
+    let subtitle_base = app_data_dir.join("subtitles").join(&document_id);
+    let segments =
+        run_whisper_transcription(&app, &whisper_program, &model_path, &converted_wav_path, &subtitle_base).await?;
+    if segments.is_empty() {
+        return Err("whisper transcription did not return any transcript segments".to_string());
+    }
+
+    let subtitle_srt_path = subtitle_base.with_extension("srt");
+    let subtitle_vtt_path = subtitle_base.with_extension("vtt");
+    if !subtitle_srt_path.is_file() {
+        return Err(format!(
+            "whisper did not generate expected subtitle file {}",
+            subtitle_srt_path.display()
+        ));
+    }
+    if !subtitle_vtt_path.is_file() {
+        return Err(format!(
+            "whisper did not generate expected subtitle file {}",
+            subtitle_vtt_path.display()
+        ));
+    }
+
+    let transcript = build_transcript_text(&segments);
+    let duration_seconds = max_duration_seconds(&segments);
+    let title = source
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .map(str::trim)
+        .filter(|stem| !stem.is_empty())
+        .unwrap_or("Imported audio")
+        .to_string();
+
+    let audio_path = path_for_storage(&converted_wav_path, &app_data_dir);
+    let subtitle_srt = path_for_storage(&subtitle_srt_path, &app_data_dir);
+    let subtitle_vtt = path_for_storage(&subtitle_vtt_path, &app_data_dir);
+    let source_uri = source.to_string_lossy().to_string();
+    persist_document(
+        &database_path,
+        &document_id,
+        &title,
+        &source_uri,
+        &transcript,
+        &audio_path,
+        &subtitle_srt,
+        &subtitle_vtt,
+        duration_seconds,
+        &segments,
+    )?;
+
+    let created_at = Utc::now().to_rfc3339();
+    Ok(ImportedDocument {
+        id: document_id,
+        title,
+        transcript,
+        audio_path,
+        subtitle_srt_path: subtitle_srt,
+        subtitle_vtt_path: subtitle_vtt,
+        duration_seconds,
+        created_at,
+        segments,
+    })
+}
+
+#[tauri::command]
+#[allow(clippy::needless_pass_by_value)]
+fn list_documents(app: tauri::AppHandle) -> Result<Vec<DocumentSummary>, String> {
+    let app_data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| format!("failed to resolve app data directory: {error}"))?;
+    ensure_directory_layout(&app_data_dir)?;
+    let database_path = database_path_from_app_data(&app_data_dir);
+    initialize_database(&database_path)?;
+
+    let connection = Connection::open(&database_path)
+        .map_err(|error| format!("failed to open database {}: {error}", database_path.display()))?;
+    let mut statement = connection
+        .prepare(
+            "SELECT id, title, summary, duration_seconds, created_at, updated_at
+             FROM documents
+             ORDER BY datetime(created_at) DESC, created_at DESC",
+        )
+        .map_err(|error| format!("failed to prepare list_documents query: {error}"))?;
+
+    let rows = statement
+        .query_map([], |row| {
+            Ok(DocumentSummary {
+                id: row.get(0)?,
+                title: row.get(1)?,
+                summary: row.get(2)?,
+                duration_seconds: row.get(3)?,
+                created_at: row.get(4)?,
+                updated_at: row.get(5)?,
+            })
+        })
+        .map_err(|error| format!("failed to query documents: {error}"))?;
+
+    let mut documents = Vec::new();
+    for row in rows {
+        documents.push(row.map_err(|error| format!("failed to decode document row: {error}"))?);
+    }
+    Ok(documents)
+}
+
+#[tauri::command]
+#[allow(clippy::needless_pass_by_value)]
+fn get_document(app: tauri::AppHandle, id: String) -> Result<DocumentDetail, String> {
+    let document_id = id.trim();
+    if document_id.is_empty() {
+        return Err("id must not be empty".to_string());
+    }
+
+    let app_data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| format!("failed to resolve app data directory: {error}"))?;
+    ensure_directory_layout(&app_data_dir)?;
+    let database_path = database_path_from_app_data(&app_data_dir);
+    initialize_database(&database_path)?;
+
+    let connection = Connection::open(&database_path)
+        .map_err(|error| format!("failed to open database {}: {error}", database_path.display()))?;
+
+    let mut document = connection
+        .query_row(
+            "SELECT id, title, summary, COALESCE(transcript, ''), audio_path, subtitle_srt_path, subtitle_vtt_path,
+                    duration_seconds, created_at, updated_at
+             FROM documents
+             WHERE id = ?1",
+            params![document_id],
+            |row| {
+                Ok(DocumentDetail {
+                    id: row.get(0)?,
+                    title: row.get(1)?,
+                    summary: row.get(2)?,
+                    transcript: row.get(3)?,
+                    audio_path: row.get(4)?,
+                    subtitle_srt_path: row.get(5)?,
+                    subtitle_vtt_path: row.get(6)?,
+                    duration_seconds: row.get(7)?,
+                    created_at: row.get(8)?,
+                    updated_at: row.get(9)?,
+                    segments: Vec::new(),
+                })
+            },
+        )
+        .optional()
+        .map_err(|error| format!("failed to query document {document_id}: {error}"))?
+        .ok_or_else(|| format!("document {document_id} was not found"))?;
+
+    let mut segment_statement = connection
+        .prepare(
+            "SELECT start_ms, end_ms, text
+             FROM document_segments
+             WHERE document_id = ?1
+             ORDER BY start_ms ASC, end_ms ASC",
+        )
+        .map_err(|error| format!("failed to prepare segments query: {error}"))?;
+    let segment_rows = segment_statement
+        .query_map(params![document_id], |row| {
+            Ok(TranscriptSegment {
+                start_ms: row.get(0)?,
+                end_ms: row.get(1)?,
+                text: row.get(2)?,
+            })
+        })
+        .map_err(|error| format!("failed to load document segments for {document_id}: {error}"))?;
+
+    let mut segments = Vec::new();
+    for row in segment_rows {
+        segments.push(row.map_err(|error| format!("failed to decode segment row for {document_id}: {error}"))?);
+    }
+    document.segments = segments;
+    Ok(document)
 }
 
 #[tauri::command]
@@ -1438,7 +2312,10 @@ pub fn run() {
             preflight,
             check_setup,
             download_whisper_model,
-            pull_ollama_model
+            pull_ollama_model,
+            import_audio_file,
+            list_documents,
+            get_document
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

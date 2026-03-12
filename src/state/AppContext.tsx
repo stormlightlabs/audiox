@@ -54,9 +54,14 @@ type AppStore = {
   preflightResult: PreflightResult | null;
   checklist: ChecklistState;
   completedChecks: number;
+  startupFlowActive: boolean;
 };
 
-type AppContextValue = { state: AppStore; runPreflight: () => Promise<PreflightResult | null> };
+type AppContextValue = {
+  state: AppStore;
+  runPreflight: () => Promise<PreflightResult | null>;
+  completeStartupFlow: () => void;
+};
 
 const AppContext = createContext<AppContextValue>();
 
@@ -94,6 +99,7 @@ export function AppProvider(props: ParentProps) {
     preflightResult: null,
     checklist: createInitialChecklist(),
     completedChecks: 0,
+    startupFlowActive: true,
   });
 
   const runPreflight = async () => {
@@ -120,6 +126,10 @@ export function AppProvider(props: ParentProps) {
       setState({ preflightPhase: "failed", preflightError: normalizeError(error) });
       return null;
     }
+  };
+
+  const completeStartupFlow = () => {
+    setState("startupFlowActive", false);
   };
 
   onMount(() => {
@@ -157,7 +167,7 @@ export function AppProvider(props: ParentProps) {
     });
   });
 
-  return <AppContext.Provider value={{ state, runPreflight }}>{props.children}</AppContext.Provider>;
+  return <AppContext.Provider value={{ state, runPreflight, completeStartupFlow }}>{props.children}</AppContext.Provider>;
 }
 
 export function useAppContext() {
