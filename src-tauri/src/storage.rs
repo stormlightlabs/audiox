@@ -105,8 +105,21 @@ impl FileStore {
         self.app_data_dir.join(candidate)
     }
 
-    pub fn resolve_whisper_model_path(&self) -> Result<PathBuf, String> {
+    pub fn resolve_whisper_model_path_for(&self, preferred_model_name: Option<&str>) -> Result<PathBuf, String> {
         let model_dir = self.app_data_dir.join("models");
+        if let Some(model_name) = preferred_model_name {
+            let preferred = model_dir.join(parsers::whisper_model_file_name(model_name));
+            if preferred.is_file() {
+                return Ok(preferred);
+            }
+
+            return Err(format!(
+                "selected whisper model '{}' was not found at {}. Download it from Settings before transcribing.",
+                model_name,
+                preferred.display()
+            ));
+        }
+
         let preferred = model_dir.join(parsers::whisper_model_file_name(models::WHISPER_DEFAULTS.model_name));
         if preferred.is_file() {
             return Ok(preferred);
@@ -168,6 +181,23 @@ impl DataStore {
             .map_err(|error| format!("failed to write setting '{key}': {error}"))?;
 
         Ok(())
+    }
+
+    fn read_setting_value(&self, key: &str) -> Result<Option<String>, String> {
+        self.connection
+            .query_row("SELECT value FROM settings WHERE key = ?1", params![key], |row| {
+                row.get::<_, String>(0)
+            })
+            .optional()
+            .map_err(|error| format!("failed to read setting '{key}': {error}"))
+    }
+
+    fn ensure_setting_with_default(&self, key: &str, default_value: &str) -> Result<(), String> {
+        if self.read_setting_value(key)?.is_some() {
+            return Ok(());
+        }
+
+        self.upsert_setting(key, default_value)
     }
 
     fn has_column(&self, table: &str, column: &str) -> Result<bool, String> {
@@ -308,6 +338,14 @@ impl DataStore {
         if installation_id.is_none() {
             self.upsert_setting("installation_id", &Uuid::new_v4().to_string())?;
         }
+
+        self.ensure_setting_with_default(models::SETTING_KEY_WHISPER_MODEL, models::WHISPER_DEFAULTS.model_name)?;
+        self.ensure_setting_with_default(models::SETTING_KEY_WHISPER_LANGUAGE, models::WHISPER_LANGUAGE_AUTO)?;
+        self.ensure_setting_with_default(
+            models::SETTING_KEY_WHISPER_THREADS,
+            &models::WHISPER_DEFAULTS.threads.to_string(),
+        )?;
+        self.ensure_setting_with_default(models::SETTING_KEY_OLLAMA_ENDPOINT, models::OLLAMA_DEFAULT_ENDPOINT)?;
         self.upsert_setting("last_bootstrap_at", &Utc::now().to_rfc3339())?;
 
         Ok(())
@@ -454,6 +492,10 @@ pub fn read_setting(connection: &Connection, key: &str) -> Result<Option<String>
         .map_err(|error| format!("failed to read setting '{key}': {error}"))
 }
 
+pub fn write_setting(database_path: &Path, key: &str, value: &str) -> Result<(), String> {
+    DataStore::new(database_path)?.upsert_setting(key, value)
+}
+
 pub fn path_for_storage(path: &Path, app_data_dir: &Path) -> String {
     FileStore::from_path(app_data_dir).path_for_storage(path)
 }
@@ -462,8 +504,8 @@ pub fn resolve_storage_path(app_data_dir: &Path, stored_path: &str) -> PathBuf {
     FileStore::from_path(app_data_dir).resolve_storage_path(stored_path)
 }
 
-pub fn resolve_whisper_model_path(app_data_dir: &Path) -> Result<PathBuf, String> {
-    FileStore::from_path(app_data_dir).resolve_whisper_model_path()
+pub fn resolve_whisper_model_path_for(app_data_dir: &Path, model_name: Option<&str>) -> Result<PathBuf, String> {
+    FileStore::from_path(app_data_dir).resolve_whisper_model_path_for(model_name)
 }
 
 pub fn persist_document(database_path: &Path, input: &PersistDocumentInput<'_>) -> Result<(), String> {
@@ -558,6 +600,34 @@ mod tests {
         set_setup_completed(&database_path, false).expect("set_setup_completed should write false");
         let value = read_setting(&connection, "setup_completed").expect("setting should be readable");
         assert_eq!(value.as_deref(), Some("false"));
+
+        fs::remove_dir_all(test_root).expect("test data should be removed");
+    }
+
+    #[test]
+    fn runtime_setting_defaults_are_initialized() {
+        let test_root = temp_dir_path("runtime-settings-defaults");
+        let bootstrap = bootstrap_at(&test_root).expect("bootstrap should succeed");
+        let database_path = PathBuf::from(bootstrap.database_path);
+        let connection = Connection::open(&database_path).expect("database should be readable");
+
+        assert_eq!(
+            read_setting(&connection, models::SETTING_KEY_WHISPER_MODEL).expect("whisper_model should be readable"),
+            Some(models::WHISPER_DEFAULTS.model_name.to_string())
+        );
+        assert_eq!(
+            read_setting(&connection, models::SETTING_KEY_WHISPER_LANGUAGE)
+                .expect("whisper_language should be readable"),
+            Some(models::WHISPER_LANGUAGE_AUTO.to_string())
+        );
+        assert_eq!(
+            read_setting(&connection, models::SETTING_KEY_WHISPER_THREADS).expect("whisper_threads should be readable"),
+            Some(models::WHISPER_DEFAULTS.threads.to_string())
+        );
+        assert_eq!(
+            read_setting(&connection, models::SETTING_KEY_OLLAMA_ENDPOINT).expect("ollama_endpoint should be readable"),
+            Some(models::OLLAMA_DEFAULT_ENDPOINT.to_string())
+        );
 
         fs::remove_dir_all(test_root).expect("test data should be removed");
     }

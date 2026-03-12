@@ -47,6 +47,11 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::set_window_title,
             commands::get_app_version,
+            commands::get_app_settings,
+            commands::save_app_settings,
+            commands::list_whisper_models,
+            commands::delete_whisper_model,
+            commands::check_ollama_connection,
             commands::initialize_app,
             commands::preflight,
             commands::check_setup,

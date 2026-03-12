@@ -55,7 +55,7 @@ Each milestone produces a usable app. Later milestones build on earlier ones.
 
 **Usable state:** User can export standalone subtitle files or get a video with burned-in subtitles.
 
-## M11: Settings & Model Management
+## ✅ M11: Settings & Model Management
 
 **Goal:** User can configure whisper models, Ollama settings, and app preferences.
 

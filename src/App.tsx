@@ -185,19 +185,17 @@ function ShellLayout(props: ParentProps) {
 
   onMount(() => {
     if (isTauriRuntime()) {
-      void invoke<string>("get_app_version")
-        .then((value) => {
-          const normalized = value?.trim();
-          if (!normalized) {
-            setAppVersion("unknown");
-            return;
-          }
-          setAppVersion(normalized);
-        })
-        .catch((error) => {
-          logger.warn("Failed to resolve app version", { keyValues: { error: normalizeError(error) } });
+      void invoke<string>("get_app_version").then((value) => {
+        const normalized = value?.trim();
+        if (!normalized) {
           setAppVersion("unknown");
-        });
+          return;
+        }
+        setAppVersion(normalized);
+      }).catch((error) => {
+        logger.warn("Failed to resolve app version", { keyValues: { error: normalizeError(error) } });
+        setAppVersion("unknown");
+      });
     } else {
       setAppVersion("web");
     }

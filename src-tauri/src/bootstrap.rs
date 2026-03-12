@@ -2,9 +2,9 @@
 
 use crate::models;
 use crate::parsers::{
-    calculate_percent, is_valid_sha256, missing_required_ollama_models, normalize_sha256, parse_ffmpeg_duration_ms,
-    parse_ffmpeg_out_time_ms, parse_ollama_model_names, parse_progress_percent, parse_whisper_segments,
-    whisper_model_download_url, whisper_model_file_name,
+    calculate_percent, is_valid_sha256, missing_required_ollama_models, normalize_ollama_endpoint, normalize_sha256,
+    parse_ffmpeg_duration_ms, parse_ffmpeg_out_time_ms, parse_ollama_model_names, parse_progress_percent,
+    parse_whisper_segments, whisper_model_download_url, whisper_model_file_name,
 };
 use crate::storage::{
     database_path_from_app_data, embedding_model_present, ensure_directory_layout, initialize_database,
@@ -448,15 +448,15 @@ pub async fn ensure_runtime_binary(app_data_dir: &Path, spec: &models::RuntimeBi
     Ok(resolved.message)
 }
 
-pub async fn fetch_ollama_model_names() -> Result<Vec<String>, String> {
-    let tags_url = models::OllamaUrl::Tags.as_str();
+pub async fn fetch_ollama_model_names(ollama_endpoint: &str) -> Result<Vec<String>, String> {
+    let tags_url = models::OllamaUrl::Tags.url(ollama_endpoint);
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(3))
         .build()
         .map_err(|error| format!("failed to initialize HTTP client: {error}"))?;
 
     let response = client
-        .get(tags_url)
+        .get(&tags_url)
         .send()
         .await
         .map_err(|error| format!("failed to reach Ollama at {tags_url}: {error}"))?;
@@ -615,7 +615,7 @@ pub async fn download_whisper_model_file(
 
 fn compute_setup_guidance(
     whisper_model_ready: bool, embedding_model_ready: bool, ollama_server_ready: bool,
-    missing_ollama_models: &[String], ollama_error: Option<&str>,
+    missing_ollama_models: &[String], ollama_error: Option<&str>, ollama_endpoint: &str,
 ) -> Vec<String> {
     let mut guidance = Vec::new();
     if !whisper_model_ready {
@@ -632,7 +632,7 @@ fn compute_setup_guidance(
     if !ollama_server_ready {
         let suffix = ollama_error.unwrap_or("Ollama did not respond.");
         guidance.push(format!(
-            "{suffix} Install Ollama from https://ollama.com and start it with `ollama serve` for title/summary/tag generation."
+            "{suffix} Install Ollama from https://ollama.com and start it with `ollama serve` for title/summary/tag generation. Configured endpoint: {ollama_endpoint}."
         ));
     } else if !missing_ollama_models.is_empty() {
         guidance.push(format!(
@@ -649,28 +649,45 @@ pub async fn check_setup_state(app_data_dir: &Path) -> Result<models::SetupStatu
     let database_path = database_path_from_app_data(app_data_dir);
     initialize_database(&database_path)?;
 
+    let connection = rusqlite::Connection::open(&database_path)
+        .map_err(|error| format!("failed to open database {}: {error}", database_path.display()))?;
+    let ollama_endpoint = match read_setting(&connection, models::SETTING_KEY_OLLAMA_ENDPOINT)? {
+        Some(value) => match normalize_ollama_endpoint(&value) {
+            Ok(endpoint) => endpoint,
+            Err(error) => {
+                log::warn!(
+                    "invalid persisted Ollama endpoint '{}': {}. Falling back to {}",
+                    value,
+                    error,
+                    models::OLLAMA_DEFAULT_ENDPOINT
+                );
+                models::OLLAMA_DEFAULT_ENDPOINT.to_string()
+            }
+        },
+        None => models::OLLAMA_DEFAULT_ENDPOINT.to_string(),
+    };
+
     let whisper_model_ready = whisper_model_present(&app_data_dir.join("models"))?;
     let embedding_model_ready = embedding_model_present(&app_data_dir.join("models").join("embed"))?;
-    let (ollama_server_ready, missing_ollama_models, ollama_error) = match fetch_ollama_model_names().await {
-        Ok(models) => {
-            let missing = missing_required_ollama_models(&models);
-            (true, missing, None)
-        }
-        Err(error) => (
-            false,
-            crate::models::REQUIRED_OLLAMA_MODELS
-                .iter()
-                .map(|item| (*item).to_string())
-                .collect(),
-            Some(error),
-        ),
-    };
+    let (ollama_server_ready, missing_ollama_models, ollama_error) =
+        match fetch_ollama_model_names(ollama_endpoint.as_str()).await {
+            Ok(models) => {
+                let missing = missing_required_ollama_models(&models);
+                (true, missing, None)
+            }
+            Err(error) => (
+                false,
+                models::REQUIRED_OLLAMA_MODELS
+                    .iter()
+                    .map(|item| (*item).to_string())
+                    .collect(),
+                Some(error),
+            ),
+        };
 
     let all_required_ready = whisper_model_ready && embedding_model_ready;
     set_setup_completed(&database_path, all_required_ready)?;
 
-    let connection = rusqlite::Connection::open(&database_path)
-        .map_err(|error| format!("failed to open database {}: {error}", database_path.display()))?;
     let setup_completed = parse_setting_bool(read_setting(&connection, "setup_completed")?);
 
     Ok(models::SetupStatus {
@@ -686,6 +703,7 @@ pub async fn check_setup_state(app_data_dir: &Path) -> Result<models::SetupStatu
             ollama_server_ready,
             &missing_ollama_models,
             ollama_error.as_deref(),
+            ollama_endpoint.as_str(),
         ),
     })
 }
@@ -869,6 +887,7 @@ pub async fn run_ffmpeg_conversion(
 
 pub async fn run_whisper_transcription(
     app: &tauri::AppHandle, whisper_program: &str, model_path: &Path, wav_path: &Path, output_base: &Path,
+    language: &str, threads: usize,
 ) -> Result<Vec<crate::models::TranscriptSegment>, String> {
     emit_transcription_progress(
         app,
@@ -889,9 +908,9 @@ pub async fn run_whisper_transcription(
         .arg("-of")
         .arg(output_base)
         .arg("-l")
-        .arg("auto")
+        .arg(language)
         .arg("-t")
-        .arg(models::WHISPER_DEFAULTS.threads.to_string())
+        .arg(threads.to_string())
         .arg("-pp");
     command.stdout(Stdio::piped());
     command.stderr(Stdio::piped());

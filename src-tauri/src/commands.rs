@@ -4,6 +4,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::Value;
 use std::cmp::Ordering;
 use std::collections::HashSet;
+use std::fs;
 use std::path::Path;
 use std::time::Duration;
 use tauri::{Emitter, Manager};
@@ -49,6 +50,108 @@ const RETRY_BASE_DELAY_MS: u64 = 500;
 fn retry_delay(attempt: usize) -> Duration {
     let multiplier = u64::try_from(attempt).unwrap_or(1);
     Duration::from_millis(RETRY_BASE_DELAY_MS.saturating_mul(multiplier))
+}
+
+fn parse_whisper_thread_setting(raw: Option<String>) -> usize {
+    raw.and_then(|value| value.trim().parse::<usize>().ok())
+        .map(|threads| threads.clamp(models::WHISPER_MIN_THREADS, models::WHISPER_MAX_THREADS))
+        .unwrap_or(models::WHISPER_DEFAULTS.threads)
+}
+
+fn read_setting_with_default(connection: &Connection, key: &str, default_value: &str) -> Result<String, String> {
+    Ok(storage::read_setting(connection, key)?.unwrap_or_else(|| default_value.to_string()))
+}
+
+fn load_runtime_settings_from_connection(connection: &Connection) -> Result<models::AppSettings, String> {
+    let whisper_model_raw = read_setting_with_default(
+        connection,
+        models::SETTING_KEY_WHISPER_MODEL,
+        models::WHISPER_DEFAULTS.model_name,
+    )?;
+    let whisper_model = parsers::validate_whisper_model_name(&whisper_model_raw)
+        .unwrap_or_else(|_| models::WHISPER_DEFAULTS.model_name.to_string());
+
+    let whisper_language_raw = read_setting_with_default(
+        connection,
+        models::SETTING_KEY_WHISPER_LANGUAGE,
+        models::WHISPER_LANGUAGE_AUTO,
+    )?;
+    let whisper_language = parsers::validate_whisper_language(&whisper_language_raw)
+        .unwrap_or_else(|_| models::WHISPER_LANGUAGE_AUTO.to_string());
+
+    let whisper_threads =
+        parse_whisper_thread_setting(storage::read_setting(connection, models::SETTING_KEY_WHISPER_THREADS)?);
+
+    let ollama_endpoint_raw = read_setting_with_default(
+        connection,
+        models::SETTING_KEY_OLLAMA_ENDPOINT,
+        models::OLLAMA_DEFAULT_ENDPOINT,
+    )?;
+    let ollama_endpoint = parsers::normalize_ollama_endpoint(&ollama_endpoint_raw)
+        .unwrap_or_else(|_| models::OLLAMA_DEFAULT_ENDPOINT.to_string());
+
+    Ok(models::AppSettings { whisper_model, whisper_language, whisper_threads, ollama_endpoint })
+}
+
+fn load_runtime_settings(database_path: &Path) -> Result<models::AppSettings, String> {
+    let connection = Connection::open(database_path)
+        .map_err(|error| format!("failed to open database {}: {error}", database_path.display()))?;
+    load_runtime_settings_from_connection(&connection)
+}
+
+fn whisper_model_name_from_file_name(file_name: &str) -> Option<String> {
+    file_name
+        .strip_prefix("ggml-")
+        .and_then(|value| value.strip_suffix(".bin"))
+        .map(ToString::to_string)
+}
+
+fn collect_whisper_model_inventory(
+    app_data_dir: &Path, selected_model: &str,
+) -> Result<models::WhisperModelInventory, String> {
+    let models_dir = app_data_dir.join("models");
+    let mut installed_models = Vec::new();
+    let mut total_size_bytes = 0_u64;
+
+    if models_dir.exists() {
+        let entries = fs::read_dir(&models_dir)
+            .map_err(|error| format!("failed to read models directory {}: {error}", models_dir.display()))?;
+        for entry in entries {
+            let entry = entry
+                .map_err(|error| format!("failed to inspect models directory {}: {error}", models_dir.display()))?;
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+
+            let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            let Some(model_name) = whisper_model_name_from_file_name(file_name) else {
+                continue;
+            };
+
+            let size_bytes = path
+                .metadata()
+                .map_err(|error| format!("failed to inspect file {}: {error}", path.display()))?
+                .len();
+            total_size_bytes = total_size_bytes.saturating_add(size_bytes);
+            installed_models.push(models::WhisperModelInfo {
+                model_name,
+                file_name: file_name.to_string(),
+                size_bytes,
+            });
+        }
+    }
+
+    installed_models.sort_by(|left, right| left.model_name.cmp(&right.model_name));
+    Ok(
+        models::WhisperModelInventory {
+            selected_model: selected_model.to_string(),
+            installed_models,
+            total_size_bytes,
+        },
+    )
 }
 
 fn fallback_summary(transcript: &str) -> Option<String> {
@@ -122,8 +225,8 @@ fn parse_generated_metadata(response_text: &str) -> GeneratedMetadata {
     GeneratedMetadata { title, summary, tags: parsers::sanitize_tags(&tags) }
 }
 
-async fn resolve_generate_model_name() -> String {
-    match bootstrap::fetch_ollama_model_names().await {
+async fn resolve_generate_model_name(ollama_endpoint: &str) -> String {
+    match bootstrap::fetch_ollama_model_names(ollama_endpoint).await {
         Ok(model_names) => {
             if let Some(model_name) = parsers::select_ollama_generate_model(&model_names) {
                 if model_name != models::OllamaModel::GenerateDefault.as_str() {
@@ -145,7 +248,8 @@ async fn resolve_generate_model_name() -> String {
         }
         Err(error) => {
             log::warn!(
-                "failed to fetch Ollama model tags before metadata generation: {}; falling back to '{}'",
+                "failed to fetch Ollama model tags from {} before metadata generation: {}; falling back to '{}'",
+                ollama_endpoint,
                 error,
                 models::OllamaModel::GenerateDefault.as_str()
             );
@@ -176,10 +280,11 @@ fn emit_embedding_setup_progress(app: &tauri::AppHandle, status: &str, message: 
 }
 
 async fn generate_metadata_once(
-    client: &reqwest::Client, transcript: &str, generate_model: &str,
+    client: &reqwest::Client, transcript: &str, generate_model: &str, ollama_endpoint: &str,
 ) -> Result<GeneratedMetadata, String> {
+    let generate_url = models::OllamaUrl::Generate.url(ollama_endpoint);
     let generation_response = client
-        .post(models::OllamaUrl::Generate.as_str())
+        .post(&generate_url)
         .json(&serde_json::json!({
             "model": generate_model,
             "prompt": metadata_prompt(transcript),
@@ -187,7 +292,12 @@ async fn generate_metadata_once(
         }))
         .send()
         .await
-        .map_err(|error| format!("failed to call Ollama generate endpoint with model '{generate_model}': {error}"))?;
+        .map_err(|error| {
+            format!(
+                "failed to call Ollama generate endpoint {} with model '{generate_model}': {error}",
+                generate_url
+            )
+        })?;
 
     if !generation_response.status().is_success() {
         let status = generation_response.status();
@@ -210,11 +320,12 @@ async fn generate_metadata_once(
 
 async fn generate_metadata_with_retry(
     app: &tauri::AppHandle, client: &reqwest::Client, transcript: &str, progress_event: models::ProgressEvent,
+    ollama_endpoint: &str,
 ) -> Result<(GeneratedMetadata, String), String> {
     let mut last_error = "metadata generation did not run".to_string();
 
     for attempt in 1..=MaxAttempts::Metadata.value() {
-        let generate_model = resolve_generate_model_name().await;
+        let generate_model = resolve_generate_model_name(ollama_endpoint).await;
         emit_metadata_progress(
             app,
             progress_event,
@@ -225,7 +336,7 @@ async fn generate_metadata_with_retry(
             ),
             12.0 + ((attempt.saturating_sub(1) as f64) * 12.0),
         );
-        match generate_metadata_once(client, transcript, &generate_model).await {
+        match generate_metadata_once(client, transcript, &generate_model, ollama_endpoint).await {
             Ok(generated) => {
                 emit_metadata_progress(
                     app,
@@ -274,12 +385,23 @@ fn cleanup_transcription_outputs(output_base: &Path) {
 
 async fn run_whisper_transcription_with_retry(
     app: &tauri::AppHandle, whisper_program: &str, model_path: &Path, wav_path: &Path, output_base: &Path,
+    language: &str, threads: usize,
 ) -> Result<Vec<models::TranscriptSegment>, String> {
     let mut last_error = "transcription did not run".to_string();
 
     for attempt in 1..=MaxAttempts::Transcription.value() {
         cleanup_transcription_outputs(output_base);
-        match bootstrap::run_whisper_transcription(app, whisper_program, model_path, wav_path, output_base).await {
+        match bootstrap::run_whisper_transcription(
+            app,
+            whisper_program,
+            model_path,
+            wav_path,
+            output_base,
+            language,
+            threads,
+        )
+        .await
+        {
             Ok(segments) => return Ok(segments),
             Err(error) => {
                 last_error = error;
@@ -500,7 +622,7 @@ fn find_matching_segment_for_chunk(
 
 async fn process_document_ai(
     app: &tauri::AppHandle, transcript: &str, segments: &[models::TranscriptSegment], fallback_title: &str,
-    progress_event: models::ProgressEvent,
+    progress_event: models::ProgressEvent, ollama_endpoint: &str,
 ) -> Result<(String, Option<String>, Vec<String>, Vec<models::EmbeddedChunk>), String> {
     emit_metadata_progress(
         app,
@@ -514,7 +636,8 @@ async fn process_document_ai(
         .timeout(Duration::from_secs(120))
         .build()
         .map_err(|error| format!("failed to initialize Ollama HTTP client: {error}"))?;
-    let (generated, generate_model) = generate_metadata_with_retry(app, &client, transcript, progress_event).await?;
+    let (generated, generate_model) =
+        generate_metadata_with_retry(app, &client, transcript, progress_event, ollama_endpoint).await?;
 
     let title = generated
         .title
@@ -594,6 +717,177 @@ pub fn get_app_version() -> String {
 
 #[tauri::command]
 #[allow(clippy::needless_pass_by_value)]
+pub fn get_app_settings(app: tauri::AppHandle) -> Result<models::AppSettings, String> {
+    let (app_data_dir, database_path) = managed_paths(&app);
+    storage::ensure_directory_layout(&app_data_dir)?;
+    storage::initialize_database(&database_path)?;
+    load_runtime_settings(&database_path)
+}
+
+#[tauri::command]
+#[allow(clippy::needless_pass_by_value)]
+pub fn save_app_settings(
+    app: tauri::AppHandle, whisper_model: Option<String>, whisper_language: Option<String>,
+    whisper_threads: Option<usize>, ollama_endpoint: Option<String>,
+) -> Result<models::AppSettings, String> {
+    let (app_data_dir, database_path) = managed_paths(&app);
+    storage::ensure_directory_layout(&app_data_dir)?;
+    storage::initialize_database(&database_path)?;
+
+    let current_settings = load_runtime_settings(&database_path)?;
+    let next_whisper_model = whisper_model
+        .as_deref()
+        .map(parsers::validate_whisper_model_name)
+        .transpose()?
+        .unwrap_or_else(|| current_settings.whisper_model.clone());
+    let next_whisper_language = whisper_language
+        .as_deref()
+        .map(parsers::validate_whisper_language)
+        .transpose()?
+        .unwrap_or_else(|| current_settings.whisper_language.clone());
+    let next_whisper_threads = match whisper_threads {
+        Some(value) => {
+            if !(models::WHISPER_MIN_THREADS..=models::WHISPER_MAX_THREADS).contains(&value) {
+                return Err(format!(
+                    "whisper_threads must be between {} and {}",
+                    models::WHISPER_MIN_THREADS,
+                    models::WHISPER_MAX_THREADS
+                ));
+            }
+            value
+        }
+        None => current_settings.whisper_threads,
+    };
+    let next_ollama_endpoint = ollama_endpoint
+        .as_deref()
+        .map(parsers::normalize_ollama_endpoint)
+        .transpose()?
+        .unwrap_or_else(|| current_settings.ollama_endpoint.clone());
+
+    storage::write_setting(
+        &database_path,
+        models::SETTING_KEY_WHISPER_MODEL,
+        next_whisper_model.as_str(),
+    )?;
+    storage::write_setting(
+        &database_path,
+        models::SETTING_KEY_WHISPER_LANGUAGE,
+        next_whisper_language.as_str(),
+    )?;
+    let next_whisper_threads_value = next_whisper_threads.to_string();
+    storage::write_setting(
+        &database_path,
+        models::SETTING_KEY_WHISPER_THREADS,
+        next_whisper_threads_value.as_str(),
+    )?;
+    storage::write_setting(
+        &database_path,
+        models::SETTING_KEY_OLLAMA_ENDPOINT,
+        next_ollama_endpoint.as_str(),
+    )?;
+
+    Ok(models::AppSettings {
+        whisper_model: next_whisper_model,
+        whisper_language: next_whisper_language,
+        whisper_threads: next_whisper_threads,
+        ollama_endpoint: next_ollama_endpoint,
+    })
+}
+
+#[tauri::command]
+#[allow(clippy::needless_pass_by_value)]
+pub fn list_whisper_models(app: tauri::AppHandle) -> Result<models::WhisperModelInventory, String> {
+    let (app_data_dir, database_path) = managed_paths(&app);
+    storage::ensure_directory_layout(&app_data_dir)?;
+    storage::initialize_database(&database_path)?;
+    let settings = load_runtime_settings(&database_path)?;
+    collect_whisper_model_inventory(&app_data_dir, &settings.whisper_model)
+}
+
+#[tauri::command]
+#[allow(clippy::needless_pass_by_value)]
+pub fn delete_whisper_model(app: tauri::AppHandle, model: String) -> Result<models::WhisperModelInventory, String> {
+    let (app_data_dir, database_path) = managed_paths(&app);
+    storage::ensure_directory_layout(&app_data_dir)?;
+    storage::initialize_database(&database_path)?;
+
+    let model_name = parsers::validate_whisper_model_name(&model)?;
+    let model_path = app_data_dir
+        .join("models")
+        .join(parsers::whisper_model_file_name(model_name.as_str()));
+    if !model_path.is_file() {
+        return Err(format!(
+            "whisper model '{}' is not installed at {}",
+            model_name,
+            model_path.display()
+        ));
+    }
+
+    fs::remove_file(&model_path)
+        .map_err(|error| format!("failed to delete whisper model {}: {error}", model_path.display()))?;
+
+    let current_settings = load_runtime_settings(&database_path)?;
+    let mut selected_model = current_settings.whisper_model;
+    if selected_model == model_name {
+        let inventory = collect_whisper_model_inventory(&app_data_dir, selected_model.as_str())?;
+        if inventory
+            .installed_models
+            .iter()
+            .any(|entry| entry.model_name == models::WHISPER_DEFAULTS.model_name)
+        {
+            selected_model = models::WHISPER_DEFAULTS.model_name.to_string();
+        } else if let Some(first) = inventory.installed_models.first() {
+            selected_model = first.model_name.clone();
+        } else {
+            selected_model = models::WHISPER_DEFAULTS.model_name.to_string();
+        }
+        storage::write_setting(
+            &database_path,
+            models::SETTING_KEY_WHISPER_MODEL,
+            selected_model.as_str(),
+        )?;
+    }
+
+    collect_whisper_model_inventory(&app_data_dir, selected_model.as_str())
+}
+
+#[tauri::command]
+#[allow(clippy::needless_pass_by_value)]
+pub async fn check_ollama_connection(app: tauri::AppHandle) -> Result<models::OllamaConnectionStatus, String> {
+    let (app_data_dir, database_path) = managed_paths(&app);
+    storage::ensure_directory_layout(&app_data_dir)?;
+    storage::initialize_database(&database_path)?;
+    let settings = load_runtime_settings(&database_path)?;
+    let endpoint = settings.ollama_endpoint.clone();
+
+    match bootstrap::fetch_ollama_model_names(endpoint.as_str()).await {
+        Ok(installed_models) => {
+            let missing_models = parsers::missing_required_ollama_models(&installed_models);
+            let message = if missing_models.is_empty() {
+                "Ollama is reachable and required models are installed.".to_string()
+            } else {
+                format!(
+                    "Ollama is reachable, but required models are missing: {}",
+                    missing_models.join(", ")
+                )
+            };
+            Ok(models::OllamaConnectionStatus { endpoint, reachable: true, installed_models, missing_models, message })
+        }
+        Err(error) => Ok(models::OllamaConnectionStatus {
+            endpoint,
+            reachable: false,
+            installed_models: Vec::new(),
+            missing_models: models::REQUIRED_OLLAMA_MODELS
+                .iter()
+                .map(|item| (*item).to_string())
+                .collect(),
+            message: error,
+        }),
+    }
+}
+
+#[tauri::command]
+#[allow(clippy::needless_pass_by_value)]
 pub async fn download_whisper_model(app: tauri::AppHandle, model: Option<String>) -> Result<String, String> {
     let (app_data_dir, database_path) = managed_paths(&app);
     storage::ensure_directory_layout(&app_data_dir)?;
@@ -641,6 +935,11 @@ pub async fn pull_ollama_model(app: tauri::AppHandle, model: String) -> Result<(
         return Err("model_name must not be empty".to_string());
     }
 
+    let (_, database_path) = managed_paths(&app);
+    storage::initialize_database(&database_path)?;
+    let settings = load_runtime_settings(&database_path)?;
+    let pull_url = models::OllamaUrl::Pull.url(settings.ollama_endpoint.as_str());
+
     bootstrap::emit_ollama_progress(
         &app,
         &model_name,
@@ -653,9 +952,8 @@ pub async fn pull_ollama_model(app: tauri::AppHandle, model: String) -> Result<(
     let client = reqwest::Client::builder()
         .build()
         .map_err(|error| format!("failed to initialize Ollama client: {error}"))?;
-    let pull_url = models::OllamaUrl::Pull.as_str();
     let mut response = client
-        .post(pull_url)
+        .post(&pull_url)
         .json(&serde_json::json!({ "name": model_name, "stream": true }))
         .send()
         .await
@@ -921,19 +1219,21 @@ pub async fn enrich_document_metadata(app: tauri::AppHandle, id: String) -> Resu
         fallback_title
     };
 
+    let (app_data_dir, database_path) = managed_paths(&app);
+    storage::ensure_directory_layout(&app_data_dir)?;
+    storage::initialize_database(&database_path)?;
+    let runtime_settings = load_runtime_settings(&database_path)?;
+
     let (title, summary, tags, chunks) = process_document_ai(
         &app,
         &transcript,
         &current_document.segments,
         &fallback_title,
         models::ProgressEvent::DocumentMetadata,
+        runtime_settings.ollama_endpoint.as_str(),
     )
     .await?;
     let keywords_csv = parsers::serialize_keywords_csv(&tags);
-
-    let (app_data_dir, database_path) = managed_paths(&app);
-    storage::ensure_directory_layout(&app_data_dir)?;
-    storage::initialize_database(&database_path)?;
 
     let connection = Connection::open(&database_path)
         .map_err(|error| format!("failed to open database {}: {error}", database_path.display()))?;
@@ -1209,6 +1509,21 @@ pub async fn preflight(app: tauri::AppHandle) -> Result<models::PreflightResult,
 
     storage::ensure_directory_layout(&app_data_dir)?;
 
+    let ollama_endpoint = match storage::initialize_database(&database_path)
+        .and_then(|_| load_runtime_settings(&database_path))
+        .map(|settings| settings.ollama_endpoint)
+    {
+        Ok(endpoint) => endpoint,
+        Err(error) => {
+            log::warn!(
+                "failed to load persisted Ollama endpoint for preflight: {}; using {}",
+                error,
+                models::OLLAMA_DEFAULT_ENDPOINT
+            );
+            models::OLLAMA_DEFAULT_ENDPOINT.to_string()
+        }
+    };
+
     let mut result = models::PreflightResult::default();
 
     match bootstrap::ensure_runtime_binary(&app_data_dir, &models::WHISPER_BINARY_SPEC).await {
@@ -1328,7 +1643,7 @@ pub async fn preflight(app: tauri::AppHandle) -> Result<models::PreflightResult,
         }
     };
 
-    match bootstrap::fetch_ollama_model_names().await {
+    match bootstrap::fetch_ollama_model_names(ollama_endpoint.as_str()).await {
         Ok(models) => {
             bootstrap::record_preflight_detail(
                 &app,
@@ -1365,7 +1680,10 @@ pub async fn preflight(app: tauri::AppHandle) -> Result<models::PreflightResult,
                 &mut result,
                 models::PreflightCheck::OllamaServer,
                 models::CheckStatus::Warn,
-                format!("{error} Start Ollama with `ollama serve` to enable title/summary/tag generation."),
+                format!(
+                    "{error} Start Ollama with `ollama serve` to enable title/summary/tag generation. Endpoint: {}",
+                    ollama_endpoint
+                ),
             );
             bootstrap::record_preflight_detail(
                 &app,
@@ -1422,11 +1740,13 @@ pub async fn import_audio_file(app: tauri::AppHandle, source_path: String) -> Re
     let (app_data_dir, database_path) = managed_paths(&app);
     storage::ensure_directory_layout(&app_data_dir)?;
     storage::initialize_database(&database_path)?;
+    let runtime_settings = load_runtime_settings(&database_path)?;
 
     let ffmpeg_program = bootstrap::resolve_runtime_binary_program(&app_data_dir, &models::FFMPEG_BINARY_SPEC).await?;
     let whisper_program =
         bootstrap::resolve_runtime_binary_program(&app_data_dir, &models::WHISPER_BINARY_SPEC).await?;
-    let model_path = storage::resolve_whisper_model_path(&app_data_dir)?;
+    let model_path =
+        storage::resolve_whisper_model_path_for(&app_data_dir, Some(runtime_settings.whisper_model.as_str()))?;
 
     let document_id = Uuid::new_v4().to_string();
     let extension = parsers::extension_for_path(&source)
@@ -1441,9 +1761,16 @@ pub async fn import_audio_file(app: tauri::AppHandle, source_path: String) -> Re
     bootstrap::run_ffmpeg_conversion(&app, &ffmpeg_program, &copied_source_path, &converted_wav_path).await?;
 
     let subtitle_base = app_data_dir.join("subtitles").join(&document_id);
-    let segments =
-        run_whisper_transcription_with_retry(&app, &whisper_program, &model_path, &converted_wav_path, &subtitle_base)
-            .await?;
+    let segments = run_whisper_transcription_with_retry(
+        &app,
+        &whisper_program,
+        &model_path,
+        &converted_wav_path,
+        &subtitle_base,
+        runtime_settings.whisper_language.as_str(),
+        runtime_settings.whisper_threads,
+    )
+    .await?;
     if segments.is_empty() {
         return Err("whisper transcription did not return any transcript segments".to_string());
     }
@@ -1478,6 +1805,7 @@ pub async fn import_audio_file(app: tauri::AppHandle, source_path: String) -> Re
         &segments,
         &fallback_title,
         models::ProgressEvent::ImportMetadata,
+        runtime_settings.ollama_endpoint.as_str(),
     )
     .await?;
     let keywords_csv = parsers::serialize_keywords_csv(&tags);
@@ -1537,11 +1865,13 @@ pub async fn import_recorded_audio(
     let (app_data_dir, database_path) = managed_paths(&app);
     storage::ensure_directory_layout(&app_data_dir)?;
     storage::initialize_database(&database_path)?;
+    let runtime_settings = load_runtime_settings(&database_path)?;
 
     let ffmpeg_program = bootstrap::resolve_runtime_binary_program(&app_data_dir, &models::FFMPEG_BINARY_SPEC).await?;
     let whisper_program =
         bootstrap::resolve_runtime_binary_program(&app_data_dir, &models::WHISPER_BINARY_SPEC).await?;
-    let model_path = storage::resolve_whisper_model_path(&app_data_dir)?;
+    let model_path =
+        storage::resolve_whisper_model_path_for(&app_data_dir, Some(runtime_settings.whisper_model.as_str()))?;
 
     let document_id = Uuid::new_v4().to_string();
     let recording_extension = parsers::extension_for_path(&source).unwrap_or_else(|| "wav".to_string());
@@ -1552,9 +1882,16 @@ pub async fn import_recorded_audio(
     }
 
     let subtitle_base = app_data_dir.join("subtitles").join(&document_id);
-    let segments =
-        run_whisper_transcription_with_retry(&app, &whisper_program, &model_path, &converted_wav_path, &subtitle_base)
-            .await?;
+    let segments = run_whisper_transcription_with_retry(
+        &app,
+        &whisper_program,
+        &model_path,
+        &converted_wav_path,
+        &subtitle_base,
+        runtime_settings.whisper_language.as_str(),
+        runtime_settings.whisper_threads,
+    )
+    .await?;
     if segments.is_empty() {
         return Err("whisper transcription did not return any transcript segments".to_string());
     }
@@ -1583,6 +1920,7 @@ pub async fn import_recorded_audio(
         &segments,
         &fallback_title,
         models::ProgressEvent::ImportMetadata,
+        runtime_settings.ollama_endpoint.as_str(),
     )
     .await?;
     let keywords_csv = parsers::serialize_keywords_csv(&tags);

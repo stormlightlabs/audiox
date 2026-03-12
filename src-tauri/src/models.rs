@@ -9,6 +9,14 @@ pub const REQUIRED_DIRECTORIES: [&str; 6] = ["models", "audio", "video", "subtit
 pub const REQUIRED_OLLAMA_MODELS: [&str; 1] = ["gemma3"];
 pub const SCHEMA_VERSION: i64 = 3;
 pub const PREFLIGHT_EVENT: &str = "preflight://check";
+pub const SETTING_KEY_WHISPER_MODEL: &str = "whisper_model";
+pub const SETTING_KEY_WHISPER_LANGUAGE: &str = "whisper_language";
+pub const SETTING_KEY_WHISPER_THREADS: &str = "whisper_threads";
+pub const SETTING_KEY_OLLAMA_ENDPOINT: &str = "ollama_endpoint";
+pub const WHISPER_LANGUAGE_AUTO: &str = "auto";
+pub const OLLAMA_DEFAULT_ENDPOINT: &str = "http://localhost:11434";
+pub const WHISPER_MIN_THREADS: usize = 1;
+pub const WHISPER_MAX_THREADS: usize = 32;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ProgressEvent {
@@ -49,18 +57,23 @@ pub enum OllamaUrl {
 }
 
 impl OllamaUrl {
-    pub const fn as_str(self) -> &'static str {
+    pub const fn as_path(self) -> &'static str {
         match self {
-            Self::Tags => "http://localhost:11434/api/tags",
-            Self::Pull => "http://localhost:11434/api/pull",
-            Self::Generate => "http://localhost:11434/api/generate",
+            Self::Tags => "/api/tags",
+            Self::Pull => "/api/pull",
+            Self::Generate => "/api/generate",
         }
+    }
+
+    pub fn url(self, endpoint: &str) -> String {
+        let normalized_endpoint = endpoint.trim_end_matches('/');
+        format!("{normalized_endpoint}{}", self.as_path())
     }
 }
 
 impl Display for OllamaUrl {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
+        f.write_str(self.as_path())
     }
 }
 
@@ -192,6 +205,41 @@ pub struct SetupStatus {
     pub setup_completed: bool,
     pub all_required_ready: bool,
     pub guidance: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppSettings {
+    pub whisper_model: String,
+    pub whisper_language: String,
+    pub whisper_threads: usize,
+    pub ollama_endpoint: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WhisperModelInfo {
+    pub model_name: String,
+    pub file_name: String,
+    pub size_bytes: u64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WhisperModelInventory {
+    pub selected_model: String,
+    pub installed_models: Vec<WhisperModelInfo>,
+    pub total_size_bytes: u64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OllamaConnectionStatus {
+    pub endpoint: String,
+    pub reachable: bool,
+    pub installed_models: Vec<String>,
+    pub missing_models: Vec<String>,
+    pub message: String,
 }
 
 #[derive(Clone, Debug, Serialize)]

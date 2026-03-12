@@ -1,11 +1,14 @@
 //! Parsing Utilities
 
 use regex::Regex;
+use reqwest::Url;
 use serde_json::Value;
 use std::collections::HashSet;
 use std::path::Path;
 
-use crate::models::{OllamaModel, TranscriptSegment, ALLOWED_IMPORT_EXTENSIONS, REQUIRED_OLLAMA_MODELS};
+use crate::models::{
+    OllamaModel, TranscriptSegment, ALLOWED_IMPORT_EXTENSIONS, REQUIRED_OLLAMA_MODELS, WHISPER_LANGUAGE_AUTO,
+};
 
 pub fn parse_ollama_model_names(payload: &Value) -> Vec<String> {
     payload
@@ -117,6 +120,57 @@ pub fn validate_whisper_model_name(model_name: &str) -> Result<String, String> {
         ));
     }
     Ok(trimmed.to_string())
+}
+
+pub fn validate_whisper_language(language: &str) -> Result<String, String> {
+    let trimmed = language.trim().to_ascii_lowercase();
+    if trimmed.is_empty() {
+        return Err("whisper language must not be empty".to_string());
+    }
+
+    if trimmed == WHISPER_LANGUAGE_AUTO {
+        return Ok(trimmed);
+    }
+
+    let valid_pattern = Regex::new(r"^[a-z]{2,8}(?:-[a-z]{2,8})?$")
+        .map_err(|error| format!("failed to compile language validation regex: {error}"))?;
+    if !valid_pattern.is_match(&trimmed) {
+        return Err(format!(
+            "invalid whisper language '{language}'. Use 'auto' or ISO-like codes such as 'en' or 'pt-br'."
+        ));
+    }
+
+    Ok(trimmed)
+}
+
+pub fn normalize_ollama_endpoint(endpoint: &str) -> Result<String, String> {
+    let trimmed = endpoint.trim().trim_end_matches('/');
+    if trimmed.is_empty() {
+        return Err("Ollama endpoint must not be empty".to_string());
+    }
+
+    let parsed = Url::parse(trimmed).map_err(|error| format!("invalid Ollama endpoint '{endpoint}': {error}"))?;
+    let scheme = parsed.scheme();
+    if scheme != "http" && scheme != "https" {
+        return Err("Ollama endpoint must use http:// or https://".to_string());
+    }
+    if parsed.host_str().is_none() {
+        return Err("Ollama endpoint must include a host".to_string());
+    }
+    if parsed.query().is_some() || parsed.fragment().is_some() {
+        return Err("Ollama endpoint must not include query parameters or fragments".to_string());
+    }
+
+    let mut normalized = format!("{scheme}://{}", parsed.host_str().unwrap_or_default());
+    if let Some(port) = parsed.port() {
+        normalized.push(':');
+        normalized.push_str(&port.to_string());
+    }
+    let path = parsed.path().trim_end_matches('/');
+    if !path.is_empty() && path != "/" {
+        normalized.push_str(path);
+    }
+    Ok(normalized)
 }
 
 pub fn whisper_model_file_name(model_name: &str) -> String {
@@ -480,6 +534,28 @@ mod tests {
         let parsed = parse_keywords_csv(Some("  AI, #podcast, ai , \"notes\" "));
         assert_eq!(parsed, vec!["AI", "podcast", "notes"]);
         assert_eq!(serialize_keywords_csv(&parsed), Some("AI, podcast, notes".to_string()));
+    }
+
+    #[test]
+    fn whisper_language_validation_accepts_auto_and_iso_like_values() {
+        assert_eq!(validate_whisper_language("auto").unwrap(), "auto");
+        assert_eq!(validate_whisper_language("EN").unwrap(), "en");
+        assert_eq!(validate_whisper_language("pt-BR").unwrap(), "pt-br");
+        assert!(validate_whisper_language("english (us)").is_err());
+    }
+
+    #[test]
+    fn ollama_endpoint_normalization_trims_and_rejects_invalid_url_parts() {
+        assert_eq!(
+            normalize_ollama_endpoint("http://localhost:11434/").unwrap(),
+            "http://localhost:11434"
+        );
+        assert_eq!(
+            normalize_ollama_endpoint("https://example.com/api").unwrap(),
+            "https://example.com/api"
+        );
+        assert!(normalize_ollama_endpoint("localhost:11434").is_err());
+        assert!(normalize_ollama_endpoint("http://localhost:11434?x=1").is_err());
     }
 
     #[test]
