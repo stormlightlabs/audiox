@@ -1,4 +1,5 @@
 import tailwindcss from "@tailwindcss/vite";
+import { fileURLToPath } from "node:url";
 import { defineConfig } from "vite";
 import solid from "vite-plugin-solid";
 import type { ViteUserConfig } from "vitest/config";
@@ -24,5 +25,6 @@ export default defineConfig(async () => ({
     hmr: host ? { protocol: "ws", host, port: 1421 } : undefined,
     watch: { ignored: ["**/src-tauri/**"] },
   },
+  resolve: { alias: { "$": fileURLToPath(new URL("src", import.meta.url)) } },
   test,
 }));
