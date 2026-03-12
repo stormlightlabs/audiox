@@ -216,7 +216,7 @@ Each milestone produces a usable app. Later milestones build on earlier ones.
 - [ ] Window title updates based on current view
 - [x] App icon and branding
 
-## M13: Local Embedding (Decouple from Ollama)
+## ✅ M13: Local Embedding (Decouple from Ollama)
 
 **Goal:** Run embedding model locally via `fastembed-rs` instead of requiring Ollama for search and document indexing.
 
@@ -231,8 +231,8 @@ Each milestone produces a usable app. Later milestones build on earlier ones.
   - Add "Embedding model" check for local model files
   - Downgrade Ollama from hard requirement to soft (`warn` instead of `fail`) — only needed for `gemma3:4b` at document creation time
 - Update setup flow: remove `nomic_embed_text` Ollama pull step, add local embedding model download step
-- Remove dead code: `parse_embed_response()`, Ollama embed error handling
-- No re-embedding migration needed — fastembed `NomicEmbedTextV15` produces identical 768-dim vectors
-- Task-type prefixes (`search_document:` / `search_query:`) are a free quality improvement over unprefixed Ollama calls
+  - Remove dead code: `parse_embed_response()`, Ollama embed error handling
+  - No re-embedding migration needed — fastembed `NomicEmbedTextV15` produces identical 768-dim vectors
+  - Note: Task-type prefixes (`search_document:` / `search_query:`) are a free quality improvement over unprefixed Ollama calls
 
 **Usable state:** Search and library browsing work without Ollama. Ollama is only needed when creating new documents (Gemma for title/summary/keywords).

@@ -439,9 +439,9 @@ mod tests {
 
     #[test]
     fn detects_missing_ollama_models() {
-        let models = vec!["nomic-embed-text:latest".to_string()];
+        let models = vec!["gemma3:latest".to_string()];
         let missing = missing_required_ollama_models(&models);
-        assert_eq!(missing, vec!["gemma3".to_string()]);
+        assert!(missing.is_empty());
     }
 
     #[test]

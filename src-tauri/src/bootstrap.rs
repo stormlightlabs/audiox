@@ -1,5 +1,15 @@
 //! Setup and Application Bootstrapping
 
+use crate::models;
+use crate::parsers::{
+    calculate_percent, is_valid_sha256, missing_required_ollama_models, normalize_sha256, parse_ffmpeg_duration_ms,
+    parse_ffmpeg_out_time_ms, parse_ollama_model_names, parse_progress_percent, parse_whisper_segments,
+    whisper_model_download_url, whisper_model_file_name,
+};
+use crate::storage::{
+    database_path_from_app_data, embedding_model_present, ensure_directory_layout, initialize_database,
+    parse_setting_bool, read_setting, set_setup_completed, whisper_model_present,
+};
 use reqwest::StatusCode;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -15,21 +25,6 @@ use std::time::Duration;
 use tauri::Emitter;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 
-use crate::models::{
-    CheckStatus, ConversionProgress, OllamaPullProgress, OllamaUrl, PreflightCheck, PreflightCheckDetail,
-    PreflightResult, ProgressEvent, RuntimeBinarySpec, SetupStatus, TranscriptionProgress, WhisperDownloadProgress,
-    COMMAND_TIMEOUT_SECONDS, DOWNLOAD_TIMEOUT_SECONDS, PREFLIGHT_EVENT, WHISPER_DEFAULTS,
-};
-use crate::parsers::{
-    calculate_percent, is_valid_sha256, missing_required_ollama_models, normalize_sha256, parse_ffmpeg_duration_ms,
-    parse_ffmpeg_out_time_ms, parse_ollama_model_names, parse_progress_percent, parse_whisper_segments,
-    whisper_model_download_url, whisper_model_file_name,
-};
-use crate::storage::{
-    database_path_from_app_data, ensure_directory_layout, initialize_database, parse_setting_bool, read_setting,
-    set_setup_completed, whisper_model_present,
-};
-
 pub fn summarize_command_output(stderr: &[u8], stdout: &[u8]) -> String {
     let stderr_message = String::from_utf8_lossy(stderr).trim().to_string();
     if !stderr_message.is_empty() {
@@ -44,33 +39,34 @@ pub fn summarize_command_output(stderr: &[u8], stdout: &[u8]) -> String {
     "command exited with a non-zero status".to_string()
 }
 
-fn detail_status_mut(result: &mut PreflightResult, check: PreflightCheck) -> &mut CheckStatus {
+fn detail_status_mut(result: &mut models::PreflightResult, check: models::PreflightCheck) -> &mut models::CheckStatus {
     match check {
-        PreflightCheck::WhisperCli => &mut result.whisper_cli,
-        PreflightCheck::Ffmpeg => &mut result.ffmpeg,
-        PreflightCheck::YtDlp => &mut result.yt_dlp,
-        PreflightCheck::WhisperModel => &mut result.whisper_model,
-        PreflightCheck::OllamaServer => &mut result.ollama_server,
-        PreflightCheck::OllamaModels => &mut result.ollama_models,
-        PreflightCheck::Database => &mut result.database,
+        models::PreflightCheck::WhisperCli => &mut result.whisper_cli,
+        models::PreflightCheck::Ffmpeg => &mut result.ffmpeg,
+        models::PreflightCheck::YtDlp => &mut result.yt_dlp,
+        models::PreflightCheck::WhisperModel => &mut result.whisper_model,
+        models::PreflightCheck::EmbeddingModel => &mut result.embedding_model,
+        models::PreflightCheck::OllamaServer => &mut result.ollama_server,
+        models::PreflightCheck::OllamaModels => &mut result.ollama_models,
+        models::PreflightCheck::Database => &mut result.database,
     }
 }
 
-fn emit_preflight_detail(app: &tauri::AppHandle, detail: &PreflightCheckDetail) {
-    let _ = app.emit(PREFLIGHT_EVENT, detail.clone());
+fn emit_preflight_detail(app: &tauri::AppHandle, detail: &models::PreflightCheckDetail) {
+    let _ = app.emit(models::PREFLIGHT_EVENT, detail.clone());
 }
 
 pub fn record_preflight_detail(
-    app: &tauri::AppHandle, result: &mut PreflightResult, check: PreflightCheck, status: CheckStatus,
-    message: impl Into<String>,
+    app: &tauri::AppHandle, result: &mut models::PreflightResult, check: models::PreflightCheck,
+    status: models::CheckStatus, message: impl Into<String>,
 ) {
-    let detail = PreflightCheckDetail { check, status, message: message.into() };
+    let detail = models::PreflightCheckDetail { check, status, message: message.into() };
     *detail_status_mut(result, check) = status;
     result.details.push(detail.clone());
     emit_preflight_detail(app, &detail);
 }
 
-fn managed_binary_filename(spec: &RuntimeBinarySpec) -> String {
+fn managed_binary_filename(spec: &models::RuntimeBinarySpec) -> String {
     #[cfg(target_os = "windows")]
     {
         format!("{}.exe", spec.executable_stem)
@@ -82,7 +78,7 @@ fn managed_binary_filename(spec: &RuntimeBinarySpec) -> String {
     }
 }
 
-fn managed_binary_path(app_data_dir: &Path, spec: &RuntimeBinarySpec) -> PathBuf {
+fn managed_binary_path(app_data_dir: &Path, spec: &models::RuntimeBinarySpec) -> PathBuf {
     app_data_dir
         .join("bin")
         .join(spec.tool_id)
@@ -140,7 +136,7 @@ fn read_sidecar_candidates_from_directory(dir: &Path, executable_stem: &str) -> 
     matches
 }
 
-fn sidecar_candidate_paths(spec: &RuntimeBinarySpec) -> Vec<PathBuf> {
+fn sidecar_candidate_paths(spec: &models::RuntimeBinarySpec) -> Vec<PathBuf> {
     let mut candidates = Vec::new();
 
     if let Ok(current_exe) = std::env::current_exe() {
@@ -181,7 +177,7 @@ async fn execute_version_command<S: AsRef<OsStr>>(
     command.stdout(Stdio::piped());
     command.stderr(Stdio::piped());
 
-    let output = tokio::time::timeout(Duration::from_secs(COMMAND_TIMEOUT_SECONDS), command.output())
+    let output = tokio::time::timeout(models::Timeouts::Command.into(), command.output())
         .await
         .map_err(|_| format!("timed out while checking {program_label}"))?
         .map_err(|error| format!("failed to spawn {program_label}: {error}"))?;
@@ -213,11 +209,11 @@ fn env_var(name: &str) -> Result<Option<String>, String> {
     }
 }
 
-fn configured_download_url(spec: &RuntimeBinarySpec) -> Result<Option<String>, String> {
+fn configured_download_url(spec: &models::RuntimeBinarySpec) -> Result<Option<String>, String> {
     env_var(spec.download_url_env)
 }
 
-fn configured_download_sha256(spec: &RuntimeBinarySpec) -> Result<Option<String>, String> {
+fn configured_download_sha256(spec: &models::RuntimeBinarySpec) -> Result<Option<String>, String> {
     let value = env_var(spec.download_sha256_env)?;
     match value {
         Some(sha256) => {
@@ -262,7 +258,7 @@ fn make_executable(_path: &Path) -> Result<(), String> {
 
 async fn download_binary(url: &str, expected_sha256: &str, destination: &Path) -> Result<(), String> {
     let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(DOWNLOAD_TIMEOUT_SECONDS))
+        .timeout(models::Timeouts::Download.into())
         .build()
         .map_err(|error| format!("failed to initialize download client: {error}"))?;
 
@@ -317,7 +313,7 @@ async fn download_binary(url: &str, expected_sha256: &str, destination: &Path) -
     Ok(())
 }
 
-async fn try_system_binary(spec: &RuntimeBinarySpec) -> Option<String> {
+async fn try_system_binary(spec: &models::RuntimeBinarySpec) -> Option<String> {
     for candidate in spec.path_candidates {
         if execute_version_command(candidate, candidate, spec.version_args)
             .await
@@ -329,21 +325,21 @@ async fn try_system_binary(spec: &RuntimeBinarySpec) -> Option<String> {
     None
 }
 
-fn download_guidance(spec: &RuntimeBinarySpec) -> String {
+fn download_guidance(spec: &models::RuntimeBinarySpec) -> String {
     format!(
         "{} is missing. Install '{}' on PATH or configure {} and {} to allow runtime download.",
         spec.display_name, spec.executable_stem, spec.download_url_env, spec.download_sha256_env
     )
 }
 
-fn non_download_guidance(spec: &RuntimeBinarySpec) -> String {
+fn non_download_guidance(spec: &models::RuntimeBinarySpec) -> String {
     format!(
         "{} is unavailable. Reinstall Audio X to restore bundled dependencies. For local development, run `bash setup.sh` and ensure '{}' is installed on PATH.",
         spec.display_name, spec.executable_stem
     )
 }
 
-pub async fn try_sidecar_binary(spec: &RuntimeBinarySpec) -> Result<Option<PathBuf>, String> {
+pub async fn try_sidecar_binary(spec: &models::RuntimeBinarySpec) -> Result<Option<PathBuf>, String> {
     let mut errors = Vec::new();
     for candidate in sidecar_candidate_paths(spec) {
         if !candidate.is_file() {
@@ -376,7 +372,9 @@ struct ResolvedBinary {
     message: String,
 }
 
-async fn resolve_runtime_binary(app_data_dir: &Path, spec: &RuntimeBinarySpec) -> Result<ResolvedBinary, String> {
+async fn resolve_runtime_binary(
+    app_data_dir: &Path, spec: &models::RuntimeBinarySpec,
+) -> Result<ResolvedBinary, String> {
     if let Some(sidecar_path) = try_sidecar_binary(spec).await? {
         return Ok(ResolvedBinary {
             program: sidecar_path.display().to_string(),
@@ -438,18 +436,20 @@ async fn resolve_runtime_binary(app_data_dir: &Path, spec: &RuntimeBinarySpec) -
     })
 }
 
-pub async fn resolve_runtime_binary_program(app_data_dir: &Path, spec: &RuntimeBinarySpec) -> Result<String, String> {
+pub async fn resolve_runtime_binary_program(
+    app_data_dir: &Path, spec: &models::RuntimeBinarySpec,
+) -> Result<String, String> {
     let resolved = resolve_runtime_binary(app_data_dir, spec).await?;
     Ok(resolved.program)
 }
 
-pub async fn ensure_runtime_binary(app_data_dir: &Path, spec: &RuntimeBinarySpec) -> Result<String, String> {
+pub async fn ensure_runtime_binary(app_data_dir: &Path, spec: &models::RuntimeBinarySpec) -> Result<String, String> {
     let resolved = resolve_runtime_binary(app_data_dir, spec).await?;
     Ok(resolved.message)
 }
 
 pub async fn fetch_ollama_model_names() -> Result<Vec<String>, String> {
-    let tags_url = OllamaUrl::Tags.as_str();
+    let tags_url = models::OllamaUrl::Tags.as_str();
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(3))
         .build()
@@ -480,7 +480,7 @@ pub fn emit_whisper_progress(
     let percent = total_bytes
         .map(|total| calculate_percent(downloaded_bytes, total))
         .unwrap_or(0.0);
-    let payload = WhisperDownloadProgress {
+    let payload = models::WhisperDownloadProgress {
         model_name: model_name.to_string(),
         status: status.to_string(),
         message: message.into(),
@@ -488,13 +488,13 @@ pub fn emit_whisper_progress(
         total_bytes,
         percent,
     };
-    let _ = app.emit(ProgressEvent::SetupWhisper.as_str(), payload);
+    let _ = app.emit(models::ProgressEvent::SetupWhisper.as_str(), payload);
 }
 
 pub fn emit_ollama_progress(
     app: &tauri::AppHandle, model_name: &str, status: &str, message: impl Into<String>, completed: u64, total: u64,
 ) {
-    let payload = OllamaPullProgress {
+    let payload = models::OllamaPullProgress {
         model_name: model_name.to_string(),
         status: status.to_string(),
         message: message.into(),
@@ -502,7 +502,7 @@ pub fn emit_ollama_progress(
         total,
         percent: calculate_percent(completed, total),
     };
-    let _ = app.emit(ProgressEvent::SetupOllama.as_str(), payload);
+    let _ = app.emit(models::ProgressEvent::SetupOllama.as_str(), payload);
 }
 
 pub async fn download_whisper_model_file(
@@ -533,7 +533,7 @@ pub async fn download_whisper_model_file(
     );
 
     let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(DOWNLOAD_TIMEOUT_SECONDS))
+        .timeout(models::Timeouts::Download.into())
         .build()
         .map_err(|error| format!("failed to initialize whisper model download client: {error}"))?;
 
@@ -614,23 +614,29 @@ pub async fn download_whisper_model_file(
 }
 
 fn compute_setup_guidance(
-    whisper_model_ready: bool, ollama_server_ready: bool, missing_ollama_models: &[String], ollama_error: Option<&str>,
+    whisper_model_ready: bool, embedding_model_ready: bool, ollama_server_ready: bool,
+    missing_ollama_models: &[String], ollama_error: Option<&str>,
 ) -> Vec<String> {
     let mut guidance = Vec::new();
     if !whisper_model_ready {
         guidance.push(format!(
             "Download {} into appdata/models to enable transcription.",
-            whisper_model_file_name(WHISPER_DEFAULTS.model_name)
+            whisper_model_file_name(models::WHISPER_DEFAULTS.model_name)
         ));
+    }
+    if !embedding_model_ready {
+        guidance.push(
+            "Download the local embedding model into appdata/models/embed to enable semantic search.".to_string(),
+        );
     }
     if !ollama_server_ready {
         let suffix = ollama_error.unwrap_or("Ollama did not respond.");
         guidance.push(format!(
-            "{suffix} Install Ollama from https://ollama.com and start it with `ollama serve`."
+            "{suffix} Install Ollama from https://ollama.com and start it with `ollama serve` for title/summary/tag generation."
         ));
     } else if !missing_ollama_models.is_empty() {
         guidance.push(format!(
-            "Pull missing Ollama models: {}.",
+            "Pull missing Ollama models for metadata generation: {}.",
             missing_ollama_models.join(", ")
         ));
     }
@@ -638,12 +644,13 @@ fn compute_setup_guidance(
     guidance
 }
 
-pub async fn check_setup_state(app_data_dir: &Path) -> Result<SetupStatus, String> {
+pub async fn check_setup_state(app_data_dir: &Path) -> Result<models::SetupStatus, String> {
     ensure_directory_layout(app_data_dir)?;
     let database_path = database_path_from_app_data(app_data_dir);
     initialize_database(&database_path)?;
 
     let whisper_model_ready = whisper_model_present(&app_data_dir.join("models"))?;
+    let embedding_model_ready = embedding_model_present(&app_data_dir.join("models").join("embed"))?;
     let (ollama_server_ready, missing_ollama_models, ollama_error) = match fetch_ollama_model_names().await {
         Ok(models) => {
             let missing = missing_required_ollama_models(&models);
@@ -659,21 +666,23 @@ pub async fn check_setup_state(app_data_dir: &Path) -> Result<SetupStatus, Strin
         ),
     };
 
-    let all_required_ready = whisper_model_ready && ollama_server_ready && missing_ollama_models.is_empty();
+    let all_required_ready = whisper_model_ready && embedding_model_ready;
     set_setup_completed(&database_path, all_required_ready)?;
 
     let connection = rusqlite::Connection::open(&database_path)
         .map_err(|error| format!("failed to open database {}: {error}", database_path.display()))?;
     let setup_completed = parse_setting_bool(read_setting(&connection, "setup_completed")?);
 
-    Ok(SetupStatus {
+    Ok(models::SetupStatus {
         whisper_model_ready,
+        embedding_model_ready,
         ollama_server_ready,
         missing_ollama_models: missing_ollama_models.clone(),
         setup_completed,
         all_required_ready,
         guidance: compute_setup_guidance(
             whisper_model_ready,
+            embedding_model_ready,
             ollama_server_ready,
             &missing_ollama_models,
             ollama_error.as_deref(),
@@ -681,16 +690,15 @@ pub async fn check_setup_state(app_data_dir: &Path) -> Result<SetupStatus, Strin
     })
 }
 
-pub fn compute_all_required_passed(result: &PreflightResult) -> bool {
+pub fn compute_all_required_passed(result: &models::PreflightResult) -> bool {
     ![
         result.whisper_cli,
         result.ffmpeg,
         result.whisper_model,
-        result.ollama_server,
-        result.ollama_models,
+        result.embedding_model,
         result.database,
     ]
-    .contains(&CheckStatus::Fail)
+    .contains(&models::CheckStatus::Fail)
 }
 
 fn emit_conversion_progress(
@@ -700,23 +708,23 @@ fn emit_conversion_progress(
         .map(|total| calculate_percent(u64::try_from(out_time_ms.max(0)).unwrap_or_default(), total as u64))
         .unwrap_or(0.0);
 
-    let payload = ConversionProgress {
+    let payload = models::ConversionProgress {
         status: status.to_string(),
         message: message.into(),
         out_time_ms,
         total_duration_ms,
         percent,
     };
-    let _ = app.emit(ProgressEvent::ImportConversion.as_str(), payload);
+    let _ = app.emit(models::ProgressEvent::ImportConversion.as_str(), payload);
 }
 
 fn emit_transcription_progress(app: &tauri::AppHandle, status: &str, message: impl Into<String>, percent: f64) {
-    let payload = TranscriptionProgress {
+    let payload = models::TranscriptionProgress {
         status: status.to_string(),
         message: message.into(),
         percent: percent.clamp(0.0, 100.0),
     };
-    let _ = app.emit(ProgressEvent::ImportTranscription.as_str(), payload);
+    let _ = app.emit(models::ProgressEvent::ImportTranscription.as_str(), payload);
 }
 
 async fn probe_ffmpeg_duration_ms(ffmpeg_program: &str, input_path: &Path) -> Result<Option<i64>, String> {
@@ -725,7 +733,7 @@ async fn probe_ffmpeg_duration_ms(ffmpeg_program: &str, input_path: &Path) -> Re
     command.stdout(Stdio::piped());
     command.stderr(Stdio::piped());
 
-    let output = tokio::time::timeout(Duration::from_secs(COMMAND_TIMEOUT_SECONDS), command.output())
+    let output = tokio::time::timeout(models::Timeouts::Command.into(), command.output())
         .await
         .map_err(|_| format!("timed out while probing media duration for {}", input_path.display()))?
         .map_err(|error| format!("failed to run ffmpeg duration probe: {error}"))?;
@@ -883,7 +891,7 @@ pub async fn run_whisper_transcription(
         .arg("-l")
         .arg("auto")
         .arg("-t")
-        .arg(WHISPER_DEFAULTS.threads.to_string())
+        .arg(models::WHISPER_DEFAULTS.threads.to_string())
         .arg("-pp");
     command.stdout(Stdio::piped());
     command.stderr(Stdio::piped());
@@ -973,13 +981,16 @@ mod tests {
 
     #[test]
     fn all_required_checks_ignore_optional_warnings() {
+        use models::{CheckStatus, PreflightResult};
+
         let result = PreflightResult {
             whisper_cli: CheckStatus::Pass,
             ffmpeg: CheckStatus::Pass,
             yt_dlp: CheckStatus::Warn,
             whisper_model: CheckStatus::Pass,
-            ollama_server: CheckStatus::Pass,
-            ollama_models: CheckStatus::Pass,
+            embedding_model: CheckStatus::Pass,
+            ollama_server: CheckStatus::Warn,
+            ollama_models: CheckStatus::Warn,
             database: CheckStatus::Pass,
             should_open_setup: false,
             all_required_passed: false,

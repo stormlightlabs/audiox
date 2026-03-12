@@ -13,6 +13,7 @@ const successfulPreflight = {
   ffmpeg: "pass",
   yt_dlp: "warn",
   whisper_model: "pass",
+  embedding_model: "pass",
   ollama_server: "pass",
   ollama_models: "pass",
   database: "pass",
@@ -23,6 +24,7 @@ const successfulPreflight = {
     { check: "ffmpeg", status: "pass", message: "ffmpeg is available on PATH as 'ffmpeg'." },
     { check: "yt_dlp", status: "warn", message: "yt-dlp missing." },
     { check: "whisper_model", status: "pass", message: "whisper model files are present." },
+    { check: "embedding_model", status: "pass", message: "Local embedding model files are present." },
     { check: "ollama_server", status: "pass", message: "Ollama server is reachable." },
     { check: "ollama_models", status: "pass", message: "Required Ollama models are available." },
     { check: "database", status: "pass", message: "SQLite database is accessible." },
@@ -57,8 +59,9 @@ const setupPreflight = {
 
 const setupStatus = {
   whisper_model_ready: false,
+  embedding_model_ready: false,
   ollama_server_ready: false,
-  missing_ollama_models: ["nomic-embed-text", "gemma3"],
+  missing_ollama_models: ["gemma3"],
   setup_completed: false,
   all_required_ready: false,
   guidance: ["Install Ollama and start it with `ollama serve`."],

@@ -16,8 +16,9 @@ const checkMeta: CheckMeta[] = [
   { key: "ffmpeg", title: "FFmpeg sidecar" },
   { key: "yt_dlp", title: "yt-dlp sidecar (optional)" },
   { key: "whisper_model", title: "Whisper model file" },
+  { key: "embedding_model", title: "Local embedding model" },
   { key: "ollama_server", title: "Ollama server" },
-  { key: "ollama_models", title: "Ollama model set" },
+  { key: "ollama_models", title: "Ollama generate model set" },
   { key: "database", title: "SQLite database" },
 ];
 
@@ -154,7 +155,7 @@ export function SplashView() {
             <p class="text-xs tracking-[0.24em] text-subtext uppercase">Startup Preflight</p>
             <h1 class="font-display text-4xl text-text">Audio X</h1>
             <p class="text-sm text-subtext">
-              Checking sidecars, models, Ollama, and local database before opening the app.
+              Checking sidecars, local models, Ollama generate support, and local database before opening the app.
             </p>
           </div>
         </header>

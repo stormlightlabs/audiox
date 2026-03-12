@@ -1,5 +1,6 @@
 mod bootstrap;
 mod commands;
+mod embedding;
 mod models;
 mod parsers;
 mod storage;
@@ -21,7 +22,8 @@ pub fn run() {
 
             fs::create_dir_all(&log_dir).map_err(std::io::Error::other)?;
 
-            app.manage(storage::StorageState::from_app_data_dir(app_data_dir));
+            app.manage(storage::StorageState::from_app_data_dir(app_data_dir.clone()));
+            app.manage(embedding::EmbeddingState::from_app_data_dir(app_data_dir));
 
             app.handle()
                 .plugin(
@@ -48,6 +50,7 @@ pub fn run() {
             commands::preflight,
             commands::check_setup,
             commands::download_whisper_model,
+            commands::download_embedding_model,
             commands::pull_ollama_model,
             commands::import_audio_file,
             commands::import_recorded_audio,
@@ -126,10 +129,6 @@ mod tests {
 
     #[test]
     fn matching_models_accept_gemma_family_variants() {
-        assert!(parsers::model_name_matches(
-            "nomic-embed-text:latest",
-            "nomic-embed-text"
-        ));
         assert!(parsers::model_name_matches("gemma3:4b", "gemma3:4b"));
         assert!(parsers::model_name_matches("gemma3:latest", "gemma3"));
         assert!(parsers::model_name_matches("gemma3:1b", "gemma3"));

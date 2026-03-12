@@ -11,6 +11,7 @@ export const PREFLIGHT_CHECK_ORDER = [
   "ffmpeg",
   "yt_dlp",
   "whisper_model",
+  "embedding_model",
   "ollama_server",
   "ollama_models",
   "database",
@@ -28,6 +29,7 @@ export type PreflightResult = {
   ffmpeg: CheckStatus;
   yt_dlp: CheckStatus;
   whisper_model: CheckStatus;
+  embedding_model: CheckStatus;
   ollama_server: CheckStatus;
   ollama_models: CheckStatus;
   database: CheckStatus;
@@ -38,6 +40,7 @@ export type PreflightResult = {
 
 export type SetupStatus = {
   whisper_model_ready: boolean;
+  embedding_model_ready: boolean;
   ollama_server_ready: boolean;
   missing_ollama_models: string[];
   setup_completed: boolean;

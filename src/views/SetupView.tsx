@@ -10,10 +10,11 @@ import { type SetupStatus, useAppContext } from "../state/AppContext";
 import { ViewScaffold } from "./ViewScaffold";
 
 const WHISPER_PROGRESS_EVENT = "setup://whisper-progress";
+const EMBEDDING_PROGRESS_EVENT = "setup://embedding-progress";
 const OLLAMA_PROGRESS_EVENT = "setup://ollama-progress";
 const GEMMA_REQUIREMENT = "gemma3";
 
-type StepKey = "whisper_model" | "ollama_server" | "nomic_embed_text" | "gemma";
+type StepKey = "whisper_model" | "embedding_model" | "ollama_server" | "gemma";
 type StepStatus = "pending" | "running" | "pass" | "fail" | "blocked";
 type SetupPhase = "checking" | "idle" | "running" | "failed" | "completed";
 
@@ -44,7 +45,9 @@ type OllamaProgressEvent = {
   percent: number;
 };
 
-const STEP_ORDER: StepKey[] = ["whisper_model", "ollama_server", "nomic_embed_text", "gemma"];
+type EmbeddingProgressEvent = { status: ProgressStatus; message: string; percent: number };
+
+const STEP_ORDER: StepKey[] = ["whisper_model", "embedding_model", "ollama_server", "gemma"];
 
 function modelRequirementMatches(candidate: string, required: string): boolean {
   const left = candidate.trim().toLowerCase();
@@ -68,9 +71,6 @@ function hasModel(status: SetupStatus, model: string): boolean {
 }
 
 function modelToStep(modelName: string): StepKey | null {
-  if (modelName.startsWith("nomic-embed-text")) {
-    return "nomic_embed_text";
-  }
   if (modelName.startsWith("gemma3")) {
     return "gemma";
   }
@@ -102,32 +102,30 @@ function buildStepMap(status: SetupStatus): Record<StepKey, SetupStep> {
         : "Model not found. Setup will download ggml-base.en.bin.",
       progress: status.whisper_model_ready ? 100 : 0,
     },
+    embedding_model: {
+      key: "embedding_model",
+      title: "Local embedding model",
+      description: "Download NomicEmbedTextV15 into appdata/models/embed.",
+      status: status.embedding_model_ready ? "pass" : "pending",
+      message: status.embedding_model_ready
+        ? "Local embedding model is available."
+        : "Model not found. Setup will download it.",
+      progress: status.embedding_model_ready ? 100 : 0,
+    },
     ollama_server: {
       key: "ollama_server",
       title: "Ollama server",
-      description: "Reachable at http://localhost:11434.",
+      description: "Optional for metadata generation at http://localhost:11434.",
       status: ollamaServerStatus,
       message: status.ollama_server_ready
         ? "Ollama server is reachable."
-        : "Ollama is not reachable. Install Ollama and start it with `ollama serve`.",
+        : "Ollama is not reachable. Search still works, but title/summary/tag generation requires Ollama.",
       progress: status.ollama_server_ready ? 100 : 0,
-    },
-    nomic_embed_text: {
-      key: "nomic_embed_text",
-      title: "nomic-embed-text",
-      description: "Embedding model required for semantic features.",
-      status: status.ollama_server_ready
-        ? (hasModel(status, "nomic-embed-text") ? "pass" : modelStepStatus)
-        : "blocked",
-      message: status.ollama_server_ready
-        ? (hasModel(status, "nomic-embed-text") ? "Model is installed." : "Model is missing and will be pulled.")
-        : "Waiting for Ollama server.",
-      progress: status.ollama_server_ready && hasModel(status, "nomic-embed-text") ? 100 : 0,
     },
     gemma: {
       key: "gemma",
       title: "gemma3 family",
-      description: "Any gemma3 variant is valid for title/summary/tag generation.",
+      description: "Optional, but required for title/summary/tag generation.",
       status: status.ollama_server_ready ? (hasModel(status, GEMMA_REQUIREMENT) ? "pass" : modelStepStatus) : "blocked",
       message: status.ollama_server_ready
         ? (hasModel(status, GEMMA_REQUIREMENT) ? "Model is installed." : "Model is missing and will be pulled.")
@@ -251,18 +249,18 @@ export function SetupView() {
       message: "Waiting for setup check...",
       progress: 0,
     },
-    ollama_server: {
-      key: "ollama_server",
-      title: "Ollama server",
-      description: "Reachable at http://localhost:11434.",
+    embedding_model: {
+      key: "embedding_model",
+      title: "Local embedding model",
+      description: "Download NomicEmbedTextV15 into appdata/models/embed.",
       status: "pending",
       message: "Waiting for setup check...",
       progress: 0,
     },
-    nomic_embed_text: {
-      key: "nomic_embed_text",
-      title: "nomic-embed-text",
-      description: "Embedding model required for semantic features.",
+    ollama_server: {
+      key: "ollama_server",
+      title: "Ollama server",
+      description: "Optional for metadata generation at http://localhost:11434.",
       status: "pending",
       message: "Waiting for setup check...",
       progress: 0,
@@ -270,7 +268,7 @@ export function SetupView() {
     gemma: {
       key: "gemma",
       title: "gemma3 family",
-      description: "Any gemma3 variant is valid for title/summary/tag generation.",
+      description: "Optional, but required for title/summary/tag generation.",
       status: "pending",
       message: "Waiting for setup check...",
       progress: 0,
@@ -339,18 +337,27 @@ export function SetupView() {
         return;
       }
 
-      if (!afterWhisper.ollama_server_ready) {
+      if (!afterWhisper.embedding_model_ready) {
+        setSteps("embedding_model", "status", "running");
+        setSteps("embedding_model", "message", "Downloading local embedding model...");
+        await invoke("download_embedding_model");
+      }
+
+      const afterEmbedding = await refreshSetup();
+      if (!afterEmbedding) {
         setPhase("failed");
         return;
       }
 
-      for (const model of afterWhisper.missing_ollama_models) {
-        const stepKey = modelToStep(model);
-        if (stepKey) {
-          setSteps(stepKey, "status", "running");
-          setSteps(stepKey, "message", `Pulling ${model} from Ollama...`);
+      if (afterEmbedding.ollama_server_ready) {
+        for (const model of afterEmbedding.missing_ollama_models) {
+          const stepKey = modelToStep(model);
+          if (stepKey) {
+            setSteps(stepKey, "status", "running");
+            setSteps(stepKey, "message", `Pulling ${model} from Ollama...`);
+          }
+          await invoke("pull_ollama_model", { model });
         }
-        await invoke("pull_ollama_model", { model });
       }
 
       const finalStatus = await refreshSetup();
@@ -379,6 +386,7 @@ export function SetupView() {
 
   onMount(() => {
     let unlistenWhisper: UnlistenFn | undefined;
+    let unlistenEmbedding: UnlistenFn | undefined;
     let unlistenOllama: UnlistenFn | undefined;
 
     void (async () => {
@@ -388,6 +396,12 @@ export function SetupView() {
           setSteps("whisper_model", "status", status);
           setSteps("whisper_model", "message", event.payload.message);
           setSteps("whisper_model", "progress", event.payload.percent);
+        });
+        unlistenEmbedding = await listen<EmbeddingProgressEvent>(EMBEDDING_PROGRESS_EVENT, (event) => {
+          const status = progressEventStatus(event.payload.status);
+          setSteps("embedding_model", "status", status);
+          setSteps("embedding_model", "message", event.payload.message);
+          setSteps("embedding_model", "progress", event.payload.percent);
         });
         unlistenOllama = await listen<OllamaProgressEvent>(OLLAMA_PROGRESS_EVENT, (event) => {
           const stepKey = modelToStep(event.payload.modelName);
@@ -413,6 +427,9 @@ export function SetupView() {
     onCleanup(() => {
       if (unlistenWhisper) {
         void unlistenWhisper();
+      }
+      if (unlistenEmbedding) {
+        void unlistenEmbedding();
       }
       if (unlistenOllama) {
         void unlistenOllama();

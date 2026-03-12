@@ -1,18 +1,19 @@
 //! Ollama and Whisper.cpp module
 
+use serde::Serialize;
 use std::fmt::{Display, Formatter};
 use std::str::FromStr;
-
-use serde::Serialize;
+use std::time::Duration;
 
 pub const REQUIRED_DIRECTORIES: [&str; 6] = ["models", "audio", "video", "subtitles", "db", "bin"];
-pub const REQUIRED_OLLAMA_MODELS: [&str; 2] = ["nomic-embed-text", "gemma3"];
+pub const REQUIRED_OLLAMA_MODELS: [&str; 1] = ["gemma3"];
 pub const SCHEMA_VERSION: i64 = 3;
 pub const PREFLIGHT_EVENT: &str = "preflight://check";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ProgressEvent {
     SetupWhisper,
+    SetupEmbedding,
     SetupOllama,
     ImportConversion,
     ImportTranscription,
@@ -24,6 +25,7 @@ impl ProgressEvent {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::SetupWhisper => "setup://whisper-progress",
+            Self::SetupEmbedding => "setup://embedding-progress",
             Self::SetupOllama => "setup://ollama-progress",
             Self::ImportConversion => "import://conversion-progress",
             Self::ImportTranscription => "import://transcription-progress",
@@ -44,7 +46,6 @@ pub enum OllamaUrl {
     Tags,
     Pull,
     Generate,
-    Embed,
 }
 
 impl OllamaUrl {
@@ -53,7 +54,6 @@ impl OllamaUrl {
             Self::Tags => "http://localhost:11434/api/tags",
             Self::Pull => "http://localhost:11434/api/pull",
             Self::Generate => "http://localhost:11434/api/generate",
-            Self::Embed => "http://localhost:11434/api/embed",
         }
     }
 }
@@ -68,7 +68,6 @@ impl Display for OllamaUrl {
 pub enum OllamaModel {
     GenerateFamily,
     GenerateDefault,
-    Embed,
 }
 
 impl OllamaModel {
@@ -76,7 +75,6 @@ impl OllamaModel {
         match self {
             Self::GenerateFamily => "gemma3",
             Self::GenerateDefault => "gemma3:4b",
-            Self::Embed => "nomic-embed-text",
         }
     }
 }
@@ -97,11 +95,41 @@ pub const WHISPER_DEFAULTS: WhisperDefaults = WhisperDefaults { model_name: "bas
 
 /// ~512 token chunks (rough approximation: ~0.75 words/token for English prose).
 pub const EMBEDDING_CHUNK_TARGET_WORDS: usize = 384;
-pub const DEFAULT_SEARCH_LIMIT: usize = 8;
-pub const MAX_SEARCH_LIMIT: usize = 50;
-pub const COMMAND_TIMEOUT_SECONDS: u64 = 8;
-pub const DOWNLOAD_TIMEOUT_SECONDS: u64 = 120;
 pub const ALLOWED_IMPORT_EXTENSIONS: [&str; 7] = ["mp3", "m4a", "wav", "flac", "ogg", "opus", "webm"];
+
+pub enum SearchLimit {
+    Default,
+    Max,
+}
+
+impl From<SearchLimit> for usize {
+    fn from(value: SearchLimit) -> Self {
+        match value {
+            SearchLimit::Default => 8,
+            SearchLimit::Max => 50,
+        }
+    }
+}
+
+pub enum Timeouts {
+    Command,
+    Download,
+}
+
+impl From<Timeouts> for u64 {
+    fn from(value: Timeouts) -> Self {
+        match value {
+            Timeouts::Command => 8,
+            Timeouts::Download => 120,
+        }
+    }
+}
+
+impl From<Timeouts> for Duration {
+    fn from(val: Timeouts) -> Self {
+        Duration::from_secs(val.into())
+    }
+}
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -127,6 +155,7 @@ pub enum PreflightCheck {
     Ffmpeg,
     YtDlp,
     WhisperModel,
+    EmbeddingModel,
     OllamaServer,
     OllamaModels,
     Database,
@@ -145,6 +174,7 @@ pub struct PreflightResult {
     pub ffmpeg: CheckStatus,
     pub yt_dlp: CheckStatus,
     pub whisper_model: CheckStatus,
+    pub embedding_model: CheckStatus,
     pub ollama_server: CheckStatus,
     pub ollama_models: CheckStatus,
     pub database: CheckStatus,
@@ -156,6 +186,7 @@ pub struct PreflightResult {
 #[derive(Clone, Debug, Serialize)]
 pub struct SetupStatus {
     pub whisper_model_ready: bool,
+    pub embedding_model_ready: bool,
     pub ollama_server_ready: bool,
     pub missing_ollama_models: Vec<String>,
     pub setup_completed: bool,
@@ -318,8 +349,9 @@ impl Default for PreflightResult {
             ffmpeg: CheckStatus::Fail,
             yt_dlp: CheckStatus::Warn,
             whisper_model: CheckStatus::Fail,
-            ollama_server: CheckStatus::Fail,
-            ollama_models: CheckStatus::Fail,
+            embedding_model: CheckStatus::Warn,
+            ollama_server: CheckStatus::Warn,
+            ollama_models: CheckStatus::Warn,
             database: CheckStatus::Fail,
             should_open_setup: false,
             all_required_passed: false,

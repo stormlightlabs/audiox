@@ -497,6 +497,32 @@ pub fn whisper_model_present(models_dir: &Path) -> Result<bool, String> {
     Ok(false)
 }
 
+pub fn embedding_model_present(embed_dir: &Path) -> Result<bool, String> {
+    if !embed_dir.exists() {
+        return Ok(false);
+    }
+
+    let mut stack = vec![embed_dir.to_path_buf()];
+    while let Some(directory) = stack.pop() {
+        let entries = fs::read_dir(&directory)
+            .map_err(|error| format!("failed to list embedding directory {}: {error}", directory.display()))?;
+
+        for entry in entries {
+            let entry = entry
+                .map_err(|error| format!("failed to inspect embedding directory {}: {error}", directory.display()))?;
+            let path = entry.path();
+            if path.is_file() {
+                return Ok(true);
+            }
+            if path.is_dir() {
+                stack.push(path);
+            }
+        }
+    }
+
+    Ok(false)
+}
+
 fn embedding_to_blob(embedding: &[f32]) -> Vec<u8> {
     let mut blob = Vec::with_capacity(std::mem::size_of_val(embedding));
     for value in embedding {

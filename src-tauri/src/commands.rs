@@ -1,4 +1,4 @@
-use super::{bootstrap, models, parsers, storage};
+use super::{bootstrap, embedding, models, parsers, storage};
 use chrono::Utc;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::Value;
@@ -6,7 +6,7 @@ use std::cmp::Ordering;
 use std::collections::HashSet;
 use std::path::Path;
 use std::time::Duration;
-use tauri::Emitter;
+use tauri::{Emitter, Manager};
 use uuid::Uuid;
 
 #[derive(Debug, Default)]
@@ -122,49 +122,6 @@ fn parse_generated_metadata(response_text: &str) -> GeneratedMetadata {
     GeneratedMetadata { title, summary, tags: parsers::sanitize_tags(&tags) }
 }
 
-fn parse_embed_response(payload: &Value) -> Result<Vec<Vec<f32>>, String> {
-    if let Some(embeddings) = payload.get("embeddings").and_then(Value::as_array) {
-        let mut vectors = Vec::with_capacity(embeddings.len());
-        for embedding in embeddings {
-            let values = embedding
-                .as_array()
-                .ok_or_else(|| "ollama embed response contains a non-array embedding".to_string())?;
-            let vector = values
-                .iter()
-                .map(|value| {
-                    value
-                        .as_f64()
-                        .map(|item| item as f32)
-                        .ok_or_else(|| "ollama embed response contains non-numeric values".to_string())
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            if vector.is_empty() {
-                return Err("ollama embed response returned an empty embedding vector".to_string());
-            }
-            vectors.push(vector);
-        }
-        return Ok(vectors);
-    }
-
-    if let Some(single_embedding) = payload.get("embedding").and_then(Value::as_array) {
-        let vector = single_embedding
-            .iter()
-            .map(|value| {
-                value
-                    .as_f64()
-                    .map(|item| item as f32)
-                    .ok_or_else(|| "ollama embed response contains non-numeric values".to_string())
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        if vector.is_empty() {
-            return Err("ollama embed response returned an empty embedding vector".to_string());
-        }
-        return Ok(vec![vector]);
-    }
-
-    Err("ollama embed response did not include embeddings".to_string())
-}
-
 async fn resolve_generate_model_name() -> String {
     match bootstrap::fetch_ollama_model_names().await {
         Ok(model_names) => {
@@ -207,6 +164,15 @@ fn emit_metadata_progress(
         percent: percent.clamp(0.0, 100.0),
     };
     let _ = app.emit(progress_event.as_str(), payload);
+}
+
+fn emit_embedding_setup_progress(app: &tauri::AppHandle, status: &str, message: impl Into<String>, percent: f64) {
+    let payload = models::TranscriptionProgress {
+        status: status.to_string(),
+        message: message.into(),
+        percent: percent.clamp(0.0, 100.0),
+    };
+    let _ = app.emit(models::ProgressEvent::SetupEmbedding.as_str(), payload);
 }
 
 async fn generate_metadata_once(
@@ -573,37 +539,15 @@ async fn process_document_ai(
         app,
         progress_event,
         "running",
-        format!(
-            "Generating semantic embeddings with {}...",
-            models::OllamaModel::Embed.as_str()
-        ),
+        "Generating semantic embeddings locally...",
         82.0,
     );
-    let embed_response = client
-        .post(models::OllamaUrl::Embed.as_str())
-        .json(&serde_json::json!({
-            "model": models::OllamaModel::Embed.as_str(),
-            "input": &chunks
-        }))
-        .send()
-        .await
-        .map_err(|error| format!("failed to call Ollama embed endpoint: {error}"))?;
-
-    if !embed_response.status().is_success() {
-        let status = embed_response.status();
-        let body = embed_response.text().await.unwrap_or_default();
-        return Err(format!("ollama embedding failed with status {status}: {body}"));
-    }
-
-    let embed_payload = embed_response
-        .json::<Value>()
-        .await
-        .map_err(|error| format!("failed to parse ollama embed response: {error}"))?;
-    let vectors = parse_embed_response(&embed_payload)?;
+    let embedding_state = app.state::<embedding::EmbeddingState>();
+    let vectors = embedding_state.embed_chunks(&chunks)?;
 
     if vectors.len() != chunks.len() {
         return Err(format!(
-            "ollama embed returned {} vectors for {} chunks",
+            "local embedding model returned {} vectors for {} chunks",
             vectors.len(),
             chunks.len()
         ));
@@ -658,6 +602,27 @@ pub async fn download_whisper_model(app: tauri::AppHandle, model: Option<String>
         setup_status.all_required_ready
     );
     Ok(model_path.display().to_string())
+}
+
+#[tauri::command]
+#[allow(clippy::needless_pass_by_value)]
+pub async fn download_embedding_model(app: tauri::AppHandle) -> Result<(), String> {
+    let (app_data_dir, database_path) = managed_paths(&app);
+    storage::ensure_directory_layout(&app_data_dir)?;
+    storage::initialize_database(&database_path)?;
+
+    emit_embedding_setup_progress(&app, "running", "Preparing local embedding model download...", 8.0);
+    let embedding_state = app.state::<embedding::EmbeddingState>();
+    embedding_state.ensure_ready()?;
+    emit_embedding_setup_progress(&app, "completed", "Local embedding model is ready.", 100.0);
+
+    let setup_status = bootstrap::check_setup_state(&app_data_dir).await?;
+    log::info!(
+        "local embedding model ready at {} (all_required_ready={})",
+        embedding_state.cache_dir().display(),
+        setup_status.all_required_ready
+    );
+    Ok(())
 }
 
 #[tauri::command]
@@ -1108,37 +1073,10 @@ pub async fn search(
     storage::initialize_database(&database_path)?;
 
     let requested_limit = limit
-        .unwrap_or(models::DEFAULT_SEARCH_LIMIT)
-        .clamp(1, models::MAX_SEARCH_LIMIT);
-
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(60))
-        .build()
-        .map_err(|error| format!("failed to initialize Ollama HTTP client: {error}"))?;
-
-    let embed_response = client
-        .post(models::OllamaUrl::Embed.as_str())
-        .json(&serde_json::json!({
-            "model": models::OllamaModel::Embed.as_str(),
-            "input": [trimmed_query]
-        }))
-        .send()
-        .await
-        .map_err(|error| format!("failed to call Ollama embed endpoint: {error}"))?;
-    if !embed_response.status().is_success() {
-        let status = embed_response.status();
-        let body = embed_response.text().await.unwrap_or_default();
-        return Err(format!("semantic search embedding failed with status {status}: {body}"));
-    }
-
-    let embed_payload = embed_response
-        .json::<Value>()
-        .await
-        .map_err(|error| format!("failed to parse Ollama embed response: {error}"))?;
-    let query_embedding = parse_embed_response(&embed_payload)?
-        .into_iter()
-        .next()
-        .ok_or_else(|| "semantic search embedding did not return a vector".to_string())?;
+        .unwrap_or_else(|| models::SearchLimit::Default.into())
+        .clamp(1, models::SearchLimit::Max.into());
+    let embedding_state = app.state::<embedding::EmbeddingState>();
+    let query_embedding = embedding_state.embed_query(&trimmed_query)?;
 
     let connection = Connection::open(&database_path)
         .map_err(|error| format!("failed to open database {}: {error}", database_path.display()))?;
@@ -1349,7 +1287,39 @@ pub async fn preflight(app: tauri::AppHandle) -> Result<models::PreflightResult,
         }
     };
 
-    let mut ollama_models_missing = false;
+    let embedding_model_missing = match storage::embedding_model_present(&app_data_dir.join("models").join("embed")) {
+        Ok(true) => {
+            bootstrap::record_preflight_detail(
+                &app,
+                &mut result,
+                models::PreflightCheck::EmbeddingModel,
+                models::CheckStatus::Pass,
+                "Local embedding model files are present.",
+            );
+            false
+        }
+        Ok(false) => {
+            bootstrap::record_preflight_detail(
+                &app,
+                &mut result,
+                models::PreflightCheck::EmbeddingModel,
+                models::CheckStatus::Warn,
+                "Local embedding model is missing in appdata/models/embed. Open setup to download it.",
+            );
+            true
+        }
+        Err(error) => {
+            bootstrap::record_preflight_detail(
+                &app,
+                &mut result,
+                models::PreflightCheck::EmbeddingModel,
+                models::CheckStatus::Warn,
+                format!("{error} Semantic search model can be downloaded from setup."),
+            );
+            true
+        }
+    };
+
     match bootstrap::fetch_ollama_model_names().await {
         Ok(models) => {
             bootstrap::record_preflight_detail(
@@ -1366,17 +1336,16 @@ pub async fn preflight(app: tauri::AppHandle) -> Result<models::PreflightResult,
                     &mut result,
                     models::PreflightCheck::OllamaModels,
                     models::CheckStatus::Pass,
-                    "Required Ollama models are available.",
+                    "Required Ollama generate models are available.",
                 );
             } else {
-                ollama_models_missing = true;
                 bootstrap::record_preflight_detail(
                     &app,
                     &mut result,
                     models::PreflightCheck::OllamaModels,
-                    models::CheckStatus::Fail,
+                    models::CheckStatus::Warn,
                     format!(
-                        "Missing Ollama models: {}. Pull them with `ollama pull <model>`.",
+                        "Missing Ollama models for metadata generation: {}. Pull them with `ollama pull <model>`.",
                         missing_models.join(", ")
                     ),
                 );
@@ -1387,14 +1356,14 @@ pub async fn preflight(app: tauri::AppHandle) -> Result<models::PreflightResult,
                 &app,
                 &mut result,
                 models::PreflightCheck::OllamaServer,
-                models::CheckStatus::Fail,
-                format!("{error} Start Ollama with `ollama serve`."),
+                models::CheckStatus::Warn,
+                format!("{error} Start Ollama with `ollama serve` to enable title/summary/tag generation."),
             );
             bootstrap::record_preflight_detail(
                 &app,
                 &mut result,
                 models::PreflightCheck::OllamaModels,
-                models::CheckStatus::Fail,
+                models::CheckStatus::Warn,
                 "Required Ollama models could not be verified because the server is unavailable.",
             );
         }
@@ -1417,7 +1386,7 @@ pub async fn preflight(app: tauri::AppHandle) -> Result<models::PreflightResult,
         ),
     }
 
-    let setup_dependencies_ready = !whisper_model_missing && !ollama_models_missing;
+    let setup_dependencies_ready = !whisper_model_missing && !embedding_model_missing;
     result.should_open_setup = !setup_dependencies_ready;
     result.all_required_passed = bootstrap::compute_all_required_passed(&result);
     storage::set_setup_completed(&database_path, setup_dependencies_ready)?;
@@ -1657,8 +1626,9 @@ pub async fn check_setup(app: tauri::AppHandle) -> Result<models::SetupStatus, S
 
     let setup = bootstrap::check_setup_state(&app_data_dir).await?;
     log::info!(
-        "setup status: whisper_ready={}, ollama_server_ready={}, missing_models={}, completed={}",
+        "setup status: whisper_ready={}, embedding_ready={}, ollama_server_ready={}, missing_models={}, completed={}",
         setup.whisper_model_ready,
+        setup.embedding_model_ready,
         setup.ollama_server_ready,
         setup.missing_ollama_models.join(","),
         setup.setup_completed
