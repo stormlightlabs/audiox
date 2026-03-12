@@ -4,13 +4,13 @@ Each milestone produces a usable app. Later milestones build on earlier ones.
 
 ## Overview
 
-- Part 1 (MVP): M1 - M4
-- Part 2: M5 - M7
-- Part 3: M13
-- Part 4: M8
-- Part 5: M9
-- Part 6: M10
-- Part 7: M11
+- ~~Part 1 (MVP): M1 - M4~~
+- ~~Part 2: M5 - M7~~
+- ~~Part 3: M13~~
+- ~~Part 4: M9~~
+- Part 5: M11, M14
+- Part 6: M8
+- Part 7: M10
 - Part 8: M12
 
 ## M8: URL Import via yt-dlp
@@ -85,6 +85,50 @@ Each milestone produces a usable app. Later milestones build on earlier ones.
 - [ ] Empty states for library, search results
 - [ ] Window title updates based on current view
 - [x] App icon and branding
+- [ ] Allow playback of imported audio files
+
+## M14: Text Note Import (.txt / .md)
+
+**Goal:** Import plain text or Markdown notes and generate metadata, summaries, keywords, and embeddings, bypassing the audio/transcription pipeline entirely.
+
+### Backend
+
+- New Tauri command `import_text_note(source_path: String)`:
+  - Read file contents from disk (`.txt` or `.md`)
+  - Use file contents as the `transcript` field (the canonical text body)
+  - Generate synthetic segments by splitting on paragraph boundaries (double newline), assigning sequential `start_ms`/`end_ms` offsets (e.g., 0–999, 1000–1999) for UI consistency
+  - Feed text into existing `process_document_ai()` → title, summary, keywords, embeddings
+  - Persist via `persist_document()` with `source_type = "text_note"`
+  - Set `audio_path`, `subtitle_srt_path`, `subtitle_vtt_path` to empty strings; `duration_seconds = 0`
+  - Store original file path in `source_uri`
+- New Tauri command `import_text_content(title: String, content: String)`:
+  - Same pipeline but accepts raw text (for paste-to-import)
+  - `source_type = "text_paste"`
+- Progress events emitted on `"import://metadata-progress"` (reuse existing event)
+
+### Frontend
+
+- Extend Import view with a "Notes" tab/section:
+  - File picker filtered to `.txt, .md` extensions
+  - Drag-and-drop zone accepting text files
+  - Optional: textarea for paste-to-import with a "Process" button
+- Preview: show first ~500 chars of the note before confirming import
+- Reuse existing progress bar (metadata generation phase only — no conversion/transcription steps)
+- On completion, navigate to `/document/{id}` as with audio imports
+
+### Document View adaptations
+
+- Hide audio player and subtitle controls when `source_type` is `text_note` or `text_paste`
+- Hide duration display
+- Show "Text Note" or "Pasted Note" badge in document header
+- Render Markdown content if the source was `.md` (use a lightweight MD renderer)
+
+### Library view adaptations
+
+- Add `source_type` filter chip: Audio | Recording | Text Note | All
+- Show a distinct icon for text-sourced documents (e.g., `i-bi-file-text`)
+
+**Usable state:** User imports a `.txt`/`.md` file or pastes text → sees a preview → confirms → gets a fully indexed document with AI-generated title, summary, keywords, and semantic search support.
 
 ## Completed
 
