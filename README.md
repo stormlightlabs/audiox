@@ -1,23 +1,36 @@
+<!-- markdownlint-disable MD033 -->
 # Audio X
 
-Audio X transcribes audio locally with `whisper.cpp` and builds searchable documents with Ollama models.
+A desktop app that transcribes audio locally with [whisper.cpp](https://github.com/ggerganov/whisper.cpp) and builds a searchable document library using [Ollama](https://ollama.com) models.
 
-## UX Strategy
+## Features
 
-The app is optimized for "open app -> click setup -> get started":
+- **Audio import** — Import mp3, m4a, wav, flac, ogg, opus, or webm files
+- **Microphone recording** — Record directly in the app with device selection
+- **Local transcription** — whisper.cpp transcribes audio with timestamped segments
+- **AI-powered metadata** — Ollama (Gemma 3) generates titles, summaries, and tags
+- **Semantic search** — Natural language search across all documents via embeddings
+- **Document library** — Browse, sort, filter, and manage transcribed documents
+- **Subtitle generation** — SRT and VTT files generated alongside transcripts
 
-- `whisper-cli`, `ffmpeg`, and `yt-dlp` are **sidecars** (bundled with app builds).
-- First-run setup downloads only:
-  - `ggml-base.en.bin` whisper model
-  - missing Ollama models (`nomic-embed-text`, `gemma3:4b`)
-- `yt-dlp` remains optional at the feature level (URL import), but now uses the same sidecar-first resolution.
+## Tech Stack
+
+| Layer    | Technology                               |
+| -------- | ---------------------------------------- |
+| Frontend | SolidJS, Tailwind v4, TypeScript         |
+| Backend  | Rust, Tauri 2                            |
+| Database | SQLite (`rusqlite`)                      |
+| AI       | Ollama (`gemma3:4b`, `nomic-embed-text`) |
+| Audio    | whisper.cpp, ffmpeg                      |
 
 ## Requirements
 
-- Ollama installed and running locally (`http://localhost:11434`)
-- Internet connection on first run for model downloads
+- [Ollama](https://ollama.com) installed and running (`http://localhost:11434`)
+- Internet connection on first run (to download models)
 
-## Local Development
+For development, you also need `whisper-cli`, `ffmpeg`, and `yt-dlp` on your PATH (or let `setup.sh` create sidecar wrappers that forward to them).
+
+## Getting Started
 
 ### 1. Install dependencies
 
@@ -25,35 +38,94 @@ The app is optimized for "open app -> click setup -> get started":
 pnpm install
 ```
 
-### 2. Run the app
+### 2. Set up dev sidecars
 
 ```sh
 bash setup.sh
+```
+
+This creates target-suffixed wrapper scripts in `src-tauri/binaries/` that forward to your system PATH binaries (`whisper-cli`, `ffmpeg`, `yt-dlp`). This keeps development smooth without committing large binaries to the repo.
+
+### 3. Run the app
+
+```sh
 pnpm tauri dev
 ```
 
-### 3. Dev sidecar wrappers
+On first launch, the app runs preflight checks and walks you through downloading the required models (whisper model + Ollama models).
 
-`setup.sh` (and `pnpm setup:sidecars`) creates target-suffixed wrapper sidecars in `src-tauri/binaries/` that forward to system PATH binaries.
+## Project
 
-This keeps local development smooth without committing large binaries.
-For production builds, replace wrappers with real release binaries.
+<details>
+<summary>Structure</summary>
 
-## Sidecar Packaging
+```sh
+src/                    # Frontend (SolidJS + TypeScript)
+  views/                # App views (Splash, Setup, Record, Import, Library, Document, Settings)
+  state/                # Global app state (AppContext)
 
-Tauri sidecar entries are configured in `src-tauri/tauri.conf.json`:
+src-tauri/              # Backend (Rust + Tauri 2)
+  src/
+    commands.rs         # Tauri IPC commands
+    bootstrap.rs        # Dependency checking & setup
+    storage.rs          # SQLite database & file management
+    models.rs           # Data structures & constants
+    parsers.rs          # Whisper/Ollama output parsing
+  binaries/             # Sidecar binaries (whisper-cli, ffmpeg, yt-dlp)
+
+docs/
+  spec.md              # Technical specification
+  roadmap.md           # Development roadmap
+```
+
+</details>
+
+<details>
+<summary>How It Works</summary>
+
+1. **Preflight** — App checks for whisper-cli, ffmpeg, whisper model, Ollama, and required Ollama models
+2. **Setup** — First-run wizard downloads `ggml-base.en.bin` and pulls Ollama models
+3. **Import/Record** — Audio is converted to 16kHz mono WAV via ffmpeg
+4. **Transcribe** — whisper.cpp produces timestamped transcript + SRT/VTT subtitles
+5. **Enrich** — Gemma 3 generates a title, summary, and tags from the transcript
+6. **Embed** — Transcript is chunked (~512 tokens) and embedded via nomic-embed-text
+7. **Search** — Queries are embedded and matched against chunks using cosine similarity
+
+</details>
+
+<details>
+<summary>Sidecar Packaging</summary>
+
+For production builds, place real target-suffixed binaries in `src-tauri/binaries/` before packaging. Sidecar entries are configured in `src-tauri/tauri.conf.json`:
 
 - `binaries/whisper-cli`
 - `binaries/ffmpeg`
 - `binaries/yt-dlp`
 
-Place target-suffixed sidecar binaries in `src-tauri/binaries/` before packaging. See [README.md](./src-tauri/binaries/README.md).
+See [src-tauri/binaries/README.md](./src-tauri/binaries/README.md) for details.
 
-## Commands
+</details>
+
+<details>
+<summary>Commands</summary>
+
+### Frontend
 
 ```sh
-pnpm lint
-pnpm test
-pnpm typecheck
-cargo test --manifest-path src-tauri/Cargo.toml
+pnpm dev                # Vite dev server only
+pnpm tauri dev          # Full app (Vite + Tauri)
+pnpm build              # Build frontend
+pnpm lint               # ESLint
+pnpm test               # Vitest
+pnpm check              # TypeScript check (can use pnpm typecheck)
 ```
+
+### Rust
+
+```sh
+cargo test --manifest-path src-tauri/Cargo.toml                         # Tests
+cargo clippy --manifest-path src-tauri/Cargo.toml  --fix --allow-dirty  # Linting
+cargo fmt --manifest-path src-tauri/Cargo.toml                          # Formatting
+```
+
+</details>

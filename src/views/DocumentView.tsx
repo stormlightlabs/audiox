@@ -1,5 +1,5 @@
 import { normalizeError } from "$/errors";
-import { formatTimestamp } from "$/format-utils";
+import { formatDate, formatDuration, formatTimestamp } from "$/format-utils";
 import { useParams, useSearchParams } from "@solidjs/router";
 import { invoke } from "@tauri-apps/api/core";
 import { createEffect, createSignal, For, onCleanup, Show } from "solid-js";
@@ -74,6 +74,23 @@ function segmentForTarget(segments: TranscriptSegment[], targetMs: number): Tran
     }
   }
   return nearest;
+}
+
+function LoadingSkeleton() {
+  return (
+    <div class="grid gap-3" aria-hidden="true">
+      <div class="animate-pulse rounded-2xl border border-overlay bg-surface/35 p-4">
+        <div class="h-4 w-1/4 rounded bg-overlay/70" />
+        <div class="mt-3 h-3 w-10/12 rounded bg-overlay/60" />
+        <div class="mt-2 h-3 w-8/12 rounded bg-overlay/60" />
+      </div>
+      <div class="animate-pulse rounded-2xl border border-overlay bg-surface/35 p-4">
+        <div class="h-3 w-1/3 rounded bg-overlay/60" />
+        <div class="mt-2 h-3 w-11/12 rounded bg-overlay/60" />
+        <div class="mt-2 h-3 w-9/12 rounded bg-overlay/60" />
+      </div>
+    </div>
+  );
 }
 
 export function DocumentView() {
@@ -241,7 +258,7 @@ export function DocumentView() {
         </Show>
 
         <Show when={isLoading()}>
-          <p class="text-sm text-subtext">Loading document...</p>
+          <LoadingSkeleton />
         </Show>
 
         <Show when={error()}>
@@ -257,6 +274,17 @@ export function DocumentView() {
             <>
               <article class="space-y-3 rounded-2xl border border-overlay bg-surface/35 p-4">
                 <p class="text-sm font-semibold text-text">Metadata</p>
+                <div class="flex flex-wrap items-center gap-2 text-[11px] text-subtext">
+                  <span class="rounded-full border border-overlay px-2 py-0.5">
+                    {formatDuration(currentDocument().durationSeconds)}
+                  </span>
+                  <span class="rounded-full border border-overlay px-2 py-0.5">
+                    {currentDocument().segments.length} segments
+                  </span>
+                  <span class="rounded-full border border-overlay px-2 py-0.5">
+                    Created {formatDate(currentDocument().createdAt)}
+                  </span>
+                </div>
                 <label class="grid gap-1 text-xs text-subtext">
                   Title
                   <input
@@ -319,6 +347,7 @@ export function DocumentView() {
                 <p class="text-xs text-subtext">Audio path: {currentDocument().audioPath ?? "N/A"}</p>
                 <p class="mt-1 text-xs text-subtext">SRT: {currentDocument().subtitleSrtPath ?? "N/A"}</p>
                 <p class="mt-1 text-xs text-subtext">VTT: {currentDocument().subtitleVttPath ?? "N/A"}</p>
+                <p class="mt-1 text-xs text-subtext">Updated: {formatDate(currentDocument().updatedAt)}</p>
               </article>
 
               <article class="rounded-2xl border border-overlay bg-surface/35 p-4">

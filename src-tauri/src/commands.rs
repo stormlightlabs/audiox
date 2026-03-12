@@ -769,7 +769,14 @@ pub fn delete_document(app: tauri::AppHandle, id: String) -> Result<(), String> 
     }
 
     for path in cleanup_paths {
-        remove_file_if_owned(&path, &app_data_dir)?;
+        if let Err(error) = remove_file_if_owned(&path, &app_data_dir) {
+            log::warn!(
+                "document {} deleted but failed to remove file {}: {}",
+                document_id,
+                path.display(),
+                error
+            );
+        }
     }
 
     Ok(())

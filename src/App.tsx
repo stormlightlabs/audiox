@@ -1,5 +1,5 @@
-import { A, Navigate, Route, Router, useLocation } from "@solidjs/router";
-import { For, type ParentProps, Show } from "solid-js";
+import { A, Navigate, Route, Router, useLocation, useNavigate } from "@solidjs/router";
+import { createEffect, createSignal, For, onCleanup, onMount, type ParentProps, Show } from "solid-js";
 import { Motion } from "solid-motionone";
 import { AppProvider, useAppContext } from "./state/AppContext";
 import { DocumentView } from "./views/DocumentView";
@@ -21,6 +21,31 @@ const navItems: NavItem[] = [
   { href: "/document", label: "Document", tagline: "reader" },
   { href: "/settings", label: "Settings", tagline: "preferences" },
 ];
+
+function windowTitleForPath(pathname: string): string {
+  if (pathname === "/splash") {
+    return "Audio X - Preflight";
+  }
+  if (pathname === "/setup") {
+    return "Audio X - Setup Wizard";
+  }
+  if (pathname === "/record") {
+    return "Audio X - Microphone Recording";
+  }
+  if (pathname === "/import") {
+    return "Audio X - Audio Import";
+  }
+  if (pathname === "/library") {
+    return "Audio X - Document Library";
+  }
+  if (pathname.startsWith("/document")) {
+    return "Audio X - Document";
+  }
+  if (pathname === "/settings") {
+    return "Audio X - Settings";
+  }
+  return "Audio X";
+}
 
 function BootStatus() {
   const { state } = useAppContext();
@@ -61,7 +86,49 @@ function SideNavigation() {
 
 function ShellLayout(props: ParentProps) {
   const location = useLocation();
+  const navigate = useNavigate();
+  const [sidebarOpen, setSidebarOpen] = createSignal(true);
   const isSplashRoute = () => location.pathname === "/splash";
+
+  createEffect(() => {
+    if (typeof document === "undefined") {
+      return;
+    }
+    document.title = windowTitleForPath(location.pathname);
+  });
+
+  onMount(() => {
+    const keydownHandler = (event: KeyboardEvent) => {
+      const commandKey = event.metaKey || event.ctrlKey;
+      if (!commandKey || event.defaultPrevented || event.altKey || event.shiftKey) {
+        return;
+      }
+
+      const key = event.key.toLowerCase();
+      if (key === "n") {
+        event.preventDefault();
+        void navigate("/record");
+        return;
+      }
+
+      if (key === "f") {
+        event.preventDefault();
+        void navigate("/library");
+        globalThis.dispatchEvent(new CustomEvent("audiox:focus-library-search"));
+        return;
+      }
+
+      if (key === "i") {
+        event.preventDefault();
+        void navigate("/import");
+      }
+    };
+
+    globalThis.addEventListener("keydown", keydownHandler);
+    onCleanup(() => {
+      globalThis.removeEventListener("keydown", keydownHandler);
+    });
+  });
 
   return (
     <div class="relative min-h-screen bg-surface px-4 py-5 text-text md:px-8 md:py-8">
@@ -69,16 +136,34 @@ function ShellLayout(props: ParentProps) {
       <Show
         when={isSplashRoute()}
         fallback={
-          <div class="mx-auto flex w-full max-w-7xl flex-col gap-6 md:min-h-[calc(100vh-4rem)] md:flex-row">
-            <SideNavigation />
-            <main class="flex-1 rounded-3xl border border-overlay bg-elevation/60 p-6 shadow-2xl shadow-surface/50 md:p-8">
-              <Motion.div
-                initial={{ opacity: 0, y: 10 }}
-                animate={{ opacity: 1, y: 0 }}
-                transition={{ duration: 0.25 }}>
-                {props.children}
-              </Motion.div>
-            </main>
+          <div class="mx-auto flex w-full max-w-7xl flex-col gap-4 md:min-h-[calc(100vh-4rem)]">
+            <div class="flex items-center justify-between rounded-2xl border border-overlay bg-elevation/70 px-3 py-2">
+              <p class="text-xs font-semibold tracking-[0.16em] text-subtext uppercase">
+                {sidebarOpen() ? "Navigation expanded" : "Navigation hidden"}
+              </p>
+              <button
+                type="button"
+                class="rounded-lg border border-overlay bg-surface/35 px-3 py-1.5 text-xs font-semibold text-subtext transition hover:border-accent/40 hover:text-text"
+                onClick={() => {
+                  setSidebarOpen((open) => !open);
+                }}>
+                {sidebarOpen() ? "Hide sidebar" : "Show sidebar"}
+              </button>
+            </div>
+
+            <div class="flex w-full flex-col gap-6 md:flex-row">
+              <Show when={sidebarOpen()}>
+                <SideNavigation />
+              </Show>
+              <main class="flex-1 rounded-3xl border border-overlay bg-elevation/60 p-6 shadow-2xl shadow-surface/50 md:p-8">
+                <Motion.div
+                  initial={{ opacity: 0, y: 10 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  transition={{ duration: 0.25 }}>
+                  {props.children}
+                </Motion.div>
+              </main>
+            </div>
           </div>
         }>
         <main class="mx-auto flex w-full max-w-5xl items-center justify-center py-6 md:min-h-[calc(100vh-4rem)]">

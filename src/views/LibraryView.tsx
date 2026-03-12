@@ -3,7 +3,7 @@ import { normalizeError } from "$/errors";
 import { formatDate, formatDuration } from "$/format-utils";
 import { A } from "@solidjs/router";
 import { invoke } from "@tauri-apps/api/core";
-import { createEffect, createMemo, createSignal, For, onCleanup, Show } from "solid-js";
+import { createEffect, createMemo, createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import { Motion, Presence } from "solid-motionone";
 import { ViewScaffold } from "./ViewScaffold";
 
@@ -80,6 +80,9 @@ export function LibraryView() {
   const [searchResults, setSearchResults] = createSignal<SearchResult[]>([]);
   const [isSearching, setIsSearching] = createSignal(false);
   const [searchError, setSearchError] = createSignal<string | null>(null);
+
+  // eslint-disable-next-line no-unassigned-vars
+  let searchInputRef: HTMLInputElement | undefined;
 
   let searchRequestCounter = 0;
 
@@ -187,6 +190,18 @@ export function LibraryView() {
     });
   });
 
+  const focusSearchHandler = () => {
+    searchInputRef?.focus();
+    searchInputRef?.select();
+  };
+
+  onMount(() => {
+    globalThis.addEventListener("audiox:focus-library-search", focusSearchHandler);
+    onCleanup(() => {
+      globalThis.removeEventListener("audiox:focus-library-search", focusSearchHandler);
+    });
+  });
+
   return (
     <ViewScaffold
       eyebrow="Library"
@@ -200,6 +215,7 @@ export function LibraryView() {
               type="search"
               placeholder="Ask a question about your transcripts"
               class="rounded-xl border border-overlay bg-elevation/70 px-3 py-2 text-sm text-text outline-none transition focus:border-accent/55"
+              ref={searchInputRef}
               value={searchQuery()}
               onInput={(event) => {
                 setSearchQuery(event.currentTarget.value);
@@ -282,9 +298,24 @@ export function LibraryView() {
         </Show>
 
         <Show when={!isLoading() && documents().length === 0 && activeSearchQuery().length === 0}>
-          <p class="rounded-xl border border-overlay bg-surface/40 p-4 text-sm text-subtext">
-            No transcripts yet. Go to Import to process your first audio file.
-          </p>
+          <section class="rounded-2xl border border-dashed border-overlay bg-surface/35 p-6">
+            <p class="text-base font-semibold text-text">No transcripts yet</p>
+            <p class="mt-1 text-sm text-subtext">
+              Import audio or record directly from your microphone to create your first document.
+            </p>
+            <div class="mt-4 flex flex-wrap gap-2">
+              <A
+                href="/import"
+                class="rounded-xl bg-accent px-3 py-1.5 text-xs font-semibold text-surface transition hover:brightness-110">
+                Open Import
+              </A>
+              <A
+                href="/record"
+                class="rounded-xl border border-overlay px-3 py-1.5 text-xs font-semibold text-subtext transition hover:border-accent/35 hover:text-text">
+                Open Record
+              </A>
+            </div>
+          </section>
         </Show>
 
         <Show when={activeSearchQuery().length > 0}>
@@ -349,51 +380,71 @@ export function LibraryView() {
           </section>
         </Show>
 
-        <Presence>
-          <For each={documents()}>
-            {(document, index) => (
-              <Motion.article
-                initial={{ opacity: 0, y: 16 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, y: -12 }}
-                transition={{ duration: 0.22, delay: index() * 0.02 }}
-                class="rounded-2xl border border-overlay bg-surface/35 p-4">
-                <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-                  <A href={`/document/${document.id}`} class="block flex-1 transition hover:opacity-95">
-                    <p class="text-base font-semibold text-text">{document.title || "Untitled transcript"}</p>
-                    <p class="mt-1 text-xs text-subtext">{document.summary || "Raw transcript only."}</p>
+        <Show when={isLoading()}>
+          <div class="grid gap-3">
+            <For each={[0, 1, 2]}>
+              {(item) => (
+                <article
+                  aria-hidden="true"
+                  class="animate-pulse rounded-2xl border border-overlay bg-surface/30 p-4"
+                  data-index={item}>
+                  <div class="h-4 w-1/3 rounded bg-overlay/70" />
+                  <div class="mt-3 h-3 w-11/12 rounded bg-overlay/60" />
+                  <div class="mt-2 h-3 w-7/12 rounded bg-overlay/60" />
+                  <div class="mt-3 h-2 w-5/12 rounded bg-overlay/50" />
+                </article>
+              )}
+            </For>
+          </div>
+        </Show>
 
-                    <div class="mt-2 flex flex-wrap items-center gap-2 text-[11px] text-subtext">
-                      <span>{formatDuration(document.durationSeconds)}</span>
-                      <span>{formatDate(document.createdAt)}</span>
-                    </div>
+        <Show when={!isLoading()}>
+          <Presence>
+            <For each={documents()}>
+              {(document, index) => (
+                <Motion.article
+                  initial={{ opacity: 0, y: 16 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: -12 }}
+                  transition={{ duration: 0.22, delay: index() * 0.02 }}
+                  class="rounded-2xl border border-overlay bg-surface/35 p-4">
+                  <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                    <A href={`/document/${document.id}`} class="block flex-1 transition hover:opacity-95">
+                      <p class="text-base font-semibold text-text">{document.title || "Untitled transcript"}</p>
+                      <p class="mt-1 text-xs text-subtext">{document.summary || "Raw transcript only."}</p>
 
-                    <Show when={document.tags.length > 0}>
-                      <div class="mt-2 flex flex-wrap gap-1.5">
-                        <For each={document.tags}>
-                          {(tag) => (
-                            <span class="rounded-full border border-overlay px-2 py-0.5 text-[10px] font-semibold text-subtext">
-                              {tag}
-                            </span>
-                          )}
-                        </For>
+                      <div class="mt-2 flex flex-wrap items-center gap-2 text-[11px] text-subtext">
+                        <span>{formatDuration(document.durationSeconds)}</span>
+                        <span>{formatDate(document.createdAt)}</span>
                       </div>
-                    </Show>
-                  </A>
 
-                  <button
-                    type="button"
-                    class="rounded-xl border border-red-400/60 bg-red-500/10 px-3 py-1.5 text-xs font-semibold text-red-200 transition hover:border-red-300"
-                    onClick={() => {
-                      void removeDocument(document.id, document.title || "Untitled transcript");
-                    }}>
-                    Delete
-                  </button>
-                </div>
-              </Motion.article>
-            )}
-          </For>
-        </Presence>
+                      <Show when={document.tags.length > 0}>
+                        <div class="mt-2 flex flex-wrap gap-1.5">
+                          <For each={document.tags}>
+                            {(tag) => (
+                              <span class="rounded-full border border-overlay px-2 py-0.5 text-[10px] font-semibold text-subtext">
+                                {tag}
+                              </span>
+                            )}
+                          </For>
+                        </div>
+                      </Show>
+                    </A>
+
+                    <button
+                      type="button"
+                      class="rounded-xl border border-red-400/60 bg-red-500/10 px-3 py-1.5 text-xs font-semibold text-red-200 transition hover:border-red-300"
+                      onClick={() => {
+                        void removeDocument(document.id, document.title || "Untitled transcript");
+                      }}>
+                      Delete
+                    </button>
+                  </div>
+                </Motion.article>
+              )}
+            </For>
+          </Presence>
+        </Show>
       </section>
     </ViewScaffold>
   );
