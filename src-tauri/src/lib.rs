@@ -46,6 +46,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::set_window_title,
+            commands::get_app_version,
             commands::initialize_app,
             commands::preflight,
             commands::check_setup,

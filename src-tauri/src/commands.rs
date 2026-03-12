@@ -585,6 +585,14 @@ pub fn set_window_title(window: tauri::WebviewWindow, title: String) -> Result<(
 }
 
 #[tauri::command]
+pub fn get_app_version() -> String {
+    option_env!("AUDIOX_APP_VERSION")
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or(env!("CARGO_PKG_VERSION"))
+        .to_string()
+}
+
+#[tauri::command]
 #[allow(clippy::needless_pass_by_value)]
 pub async fn download_whisper_model(app: tauri::AppHandle, model: Option<String>) -> Result<String, String> {
     let (app_data_dir, database_path) = managed_paths(&app);

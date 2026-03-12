@@ -5,6 +5,7 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { createEffect, createSignal, For, onCleanup, onMount, type ParentProps, Show } from "solid-js";
 import { Motion, Presence } from "solid-motionone";
 import { Accordion } from "./components/Accordion";
+import { StatusBar } from "./components/StatusBar";
 import { normalizeError } from "./errors";
 import { AppProvider, PREFLIGHT_CHECK_ORDER, useAppContext } from "./state/AppContext";
 import { DocumentView } from "./views/DocumentView";
@@ -70,64 +71,6 @@ function windowTitleForPath(pathname: string): string {
 
 function isTauriRuntime(): boolean {
   return Boolean((globalThis as typeof globalThis & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__);
-}
-
-function SidebarToggle(props: { sidebarOpen: boolean; onToggleSidebar: () => void }) {
-  return (
-    <button
-      type="button"
-      class="rounded-lg border border-overlay bg-surface/35 px-3 py-1.5 text-xs font-semibold text-subtext transition hover:border-accent/40 hover:text-text"
-      onClick={() => props.onToggleSidebar()}>
-      <Show
-        when={props.sidebarOpen}
-        fallback={
-          <span class="flex items-center">
-            <span class="sr-only">Hide navigation</span>
-            <i class="i-bi-chevron-bar-right w-4 h-4" />
-          </span>
-        }>
-        <span class="flex items-center">
-          <span class="sr-only">Show navigation</span>
-          <i class="i-bi-chevron-bar-left w-4 h-4" />
-        </span>
-      </Show>
-    </button>
-  );
-}
-
-function StatusBar(props: { sidebarOpen: boolean; onToggleSidebar: () => void }) {
-  const { state } = useAppContext();
-  return (
-    <footer class="fixed inset-x-0 bottom-0 z-40 h-12 border-t border-overlay bg-black/95 backdrop-blur">
-      <div class="mx-auto flex h-full w-full flex-wrap items-center justify-between gap-4 px-2 md:px-4">
-        <div class="flex flex-wrap items-center gap-2">
-          <SidebarToggle {...props} />
-          <A
-            href="/library"
-            class="rounded-lg border border-overlay/70 bg-surface/30 px-3 py-1.5 text-xs font-semibold text-subtext transition hover:border-accent/40 hover:text-text"
-            activeClass="!border-accent/60 !bg-accent/15 !text-text">
-            Home
-          </A>
-          <A
-            href="/splash"
-            class="rounded-lg border border-overlay/70 bg-surface/30 px-3 py-1.5 text-xs font-semibold text-subtext transition hover:border-accent/40 hover:text-text"
-            activeClass="!border-accent/60 !bg-accent/15 !text-text">
-            Splash screen
-          </A>
-          <A
-            href="/setup"
-            class="rounded-lg border border-overlay/70 bg-surface/30 px-3 py-1.5 text-xs font-semibold text-subtext transition hover:border-accent/40 hover:text-text"
-            activeClass="!border-accent/60 !bg-accent/15 !text-text">
-            Setup screen
-          </A>
-        </div>
-        <p class="text-right text-[11px] font-semibold tracking-[0.14em] text-subtext uppercase md:text-xs">
-          PREFLIGHT <span class="text-text">{state.preflightPhase}</span>{" "}
-          <span>{state.completedChecks}/{PREFLIGHT_CHECK_ORDER.length} checks complete</span>
-        </p>
-      </div>
-    </footer>
-  );
 }
 
 function SideNavigation() {
@@ -218,9 +161,11 @@ function SideNavigation() {
 }
 
 function ShellLayout(props: ParentProps) {
+  const { state } = useAppContext();
   const location = useLocation();
   const navigate = useNavigate();
   const [sidebarOpen, setSidebarOpen] = createSignal(true);
+  const [appVersion, setAppVersion] = createSignal("loading...");
   const isSplashRoute = () => location.pathname === "/splash";
 
   createEffect(() => {
@@ -239,6 +184,24 @@ function ShellLayout(props: ParentProps) {
   });
 
   onMount(() => {
+    if (isTauriRuntime()) {
+      void invoke<string>("get_app_version")
+        .then((value) => {
+          const normalized = value?.trim();
+          if (!normalized) {
+            setAppVersion("unknown");
+            return;
+          }
+          setAppVersion(normalized);
+        })
+        .catch((error) => {
+          logger.warn("Failed to resolve app version", { keyValues: { error: normalizeError(error) } });
+          setAppVersion("unknown");
+        });
+    } else {
+      setAppVersion("web");
+    }
+
     const keydownHandler = (event: KeyboardEvent) => {
       const commandKey = event.metaKey || event.ctrlKey;
       if (!commandKey || event.defaultPrevented || event.altKey || event.shiftKey) {
@@ -301,6 +264,10 @@ function ShellLayout(props: ParentProps) {
       </Show>
       <StatusBar
         sidebarOpen={sidebarOpen()}
+        preflightPhase={state.preflightPhase}
+        completedChecks={state.completedChecks}
+        totalChecks={PREFLIGHT_CHECK_ORDER.length}
+        appVersion={appVersion()}
         onToggleSidebar={() => {
           setSidebarOpen((open) => !open);
         }} />
