@@ -9,7 +9,9 @@ import globals from "globals";
 import tseslint from "typescript-eslint";
 /** @typedef {import("eslint").Linter.Config} FlatConfig */
 const solidConfig = /** @type {FlatConfig} */ (/** @type {unknown} */ (solid));
-const unicornConfig = /** @type {FlatConfig} */ (/** @type {unknown} */ (unicorn.configs["flat/recommended"]));
+const unicornConfig = /** @type {FlatConfig} */ (
+  /** @type {unknown} */ (unicorn.configs["flat/recommended"])
+);
 
 export default defineConfig(
   { ignores: ["dist/**", "node_modules/**", "src-tauri/target/**"] },
@@ -18,11 +20,26 @@ export default defineConfig(
   unicornConfig,
   {
     files: ["**/*.{ts,tsx}"],
-    languageOptions: { parser: tsParser, parserOptions: { projectService: true }, globals: globals.browser },
+    languageOptions: {
+      parser: tsParser,
+      parserOptions: { projectService: true },
+      globals: globals.browser,
+    },
     rules: { "no-undef": "off" },
   },
-  { files: ["scripts/**/*.{js,mjs,cjs}", "vite.config.ts"], languageOptions: { globals: globals.node } },
-  { files: ["**/*.tsx"], ...solidConfig, plugins: { react }, rules: { "react/jsx-max-depth": ["error", { max: 4 }] } },
+  {
+    files: ["scripts/**/*.{js,mjs,cjs}", "vite.config.ts"],
+    languageOptions: { globals: globals.node },
+  },
+  {
+    files: ["**/*.tsx"],
+    plugins: { react },
+    rules: { "react/jsx-max-depth": ["error", { max: 4 }] },
+  },
+  {
+    files: ["**/*.tsx"],
+    ...solidConfig,
+  },
   {
     rules: {
       "unicorn/catch-error-name": "off",
@@ -33,7 +50,10 @@ export default defineConfig(
       "unicorn/prefer-top-level-await": "off",
       "unicorn/prevent-abbreviations": "off",
       "unicorn/prefer-ternary": "off",
-      "@typescript-eslint/no-unused-vars": ["warn", { argsIgnorePattern: "^_" }],
+      "@typescript-eslint/no-unused-vars": [
+        "warn",
+        { argsIgnorePattern: "^_" },
+      ],
     },
   },
 );

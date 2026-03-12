@@ -43,6 +43,7 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            commands::set_window_title,
             commands::initialize_app,
             commands::preflight,
             commands::check_setup,
@@ -53,6 +54,7 @@ pub fn run() {
             commands::list_documents,
             commands::get_document,
             commands::update_document,
+            commands::enrich_document_metadata,
             commands::delete_document,
             commands::search
         ])

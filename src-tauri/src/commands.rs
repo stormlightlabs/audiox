@@ -197,13 +197,16 @@ async fn resolve_generate_model_name() -> String {
     }
 }
 
-fn emit_metadata_progress(app: &tauri::AppHandle, status: &str, message: impl Into<String>, percent: f64) {
+fn emit_metadata_progress(
+    app: &tauri::AppHandle, progress_event: models::ProgressEvent, status: &str, message: impl Into<String>,
+    percent: f64,
+) {
     let payload = models::TranscriptionProgress {
         status: status.to_string(),
         message: message.into(),
         percent: percent.clamp(0.0, 100.0),
     };
-    let _ = app.emit(models::ProgressEvent::ImportMetadata.as_str(), payload);
+    let _ = app.emit(progress_event.as_str(), payload);
 }
 
 async fn generate_metadata_once(
@@ -240,7 +243,7 @@ async fn generate_metadata_once(
 }
 
 async fn generate_metadata_with_retry(
-    app: &tauri::AppHandle, client: &reqwest::Client, transcript: &str,
+    app: &tauri::AppHandle, client: &reqwest::Client, transcript: &str, progress_event: models::ProgressEvent,
 ) -> Result<(GeneratedMetadata, String), String> {
     let mut last_error = "metadata generation did not run".to_string();
 
@@ -248,6 +251,7 @@ async fn generate_metadata_with_retry(
         let generate_model = resolve_generate_model_name().await;
         emit_metadata_progress(
             app,
+            progress_event,
             "running",
             format!(
                 "Generating title, summary, and tags with {generate_model} (attempt {attempt}/{})...",
@@ -259,6 +263,7 @@ async fn generate_metadata_with_retry(
             Ok(generated) => {
                 emit_metadata_progress(
                     app,
+                    progress_event,
                     "running",
                     format!("Metadata generated with {generate_model}. Preparing embeddings..."),
                     62.0,
@@ -288,7 +293,7 @@ async fn generate_metadata_with_retry(
         MaxAttempts::Metadata.value(),
         last_error
     );
-    emit_metadata_progress(app, "error", final_error.clone(), 0.0);
+    emit_metadata_progress(app, progress_event, "error", final_error.clone(), 0.0);
     Err(final_error)
 }
 
@@ -416,6 +421,14 @@ fn embedding_from_blob(blob: &[u8]) -> Result<Vec<f32>, String> {
     Ok(embedding)
 }
 
+fn embedding_to_blob(embedding: &[f32]) -> Vec<u8> {
+    let mut blob = Vec::with_capacity(std::mem::size_of_val(embedding));
+    for value in embedding {
+        blob.extend_from_slice(&value.to_le_bytes());
+    }
+    blob
+}
+
 fn cosine_similarity(query: &[f32], candidate: &[f32]) -> Option<f64> {
     if query.len() != candidate.len() || query.is_empty() {
         return None;
@@ -521,14 +534,21 @@ fn find_matching_segment_for_chunk(
 
 async fn process_document_ai(
     app: &tauri::AppHandle, transcript: &str, segments: &[models::TranscriptSegment], fallback_title: &str,
+    progress_event: models::ProgressEvent,
 ) -> Result<(String, Option<String>, Vec<String>, Vec<models::EmbeddedChunk>), String> {
-    emit_metadata_progress(app, "running", "Starting Gemma transcript enrichment...", 5.0);
+    emit_metadata_progress(
+        app,
+        progress_event,
+        "running",
+        "Starting Gemma transcript enrichment...",
+        5.0,
+    );
 
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(120))
         .build()
         .map_err(|error| format!("failed to initialize Ollama HTTP client: {error}"))?;
-    let (generated, generate_model) = generate_metadata_with_retry(app, &client, transcript).await?;
+    let (generated, generate_model) = generate_metadata_with_retry(app, &client, transcript, progress_event).await?;
 
     let title = generated
         .title
@@ -537,7 +557,13 @@ async fn process_document_ai(
     let summary = generated.summary.or_else(|| fallback_summary(transcript));
     let tags = generated.tags;
 
-    emit_metadata_progress(app, "running", "Chunking transcript for embedding generation...", 72.0);
+    emit_metadata_progress(
+        app,
+        progress_event,
+        "running",
+        "Chunking transcript for embedding generation...",
+        72.0,
+    );
     let chunks = parsers::build_embedding_chunks(segments, transcript, models::EMBEDDING_CHUNK_TARGET_WORDS);
     if chunks.is_empty() {
         return Err("could not create transcript chunks for embeddings".to_string());
@@ -545,6 +571,7 @@ async fn process_document_ai(
 
     emit_metadata_progress(
         app,
+        progress_event,
         "running",
         format!(
             "Generating semantic embeddings with {}...",
@@ -591,12 +618,26 @@ async fn process_document_ai(
 
     emit_metadata_progress(
         app,
+        progress_event,
         "completed",
         format!("Gemma enrichment complete with {generate_model}. Embeddings ready."),
         100.0,
     );
 
     Ok((title, summary, tags, embedded_chunks))
+}
+
+#[tauri::command]
+#[allow(clippy::needless_pass_by_value)]
+pub fn set_window_title(window: tauri::WebviewWindow, title: String) -> Result<(), String> {
+    let next_title = title.trim();
+    if next_title.is_empty() {
+        return Err("title must not be empty".to_string());
+    }
+
+    window
+        .set_title(next_title)
+        .map_err(|error| format!("failed to set window title: {error}"))
 }
 
 #[tauri::command]
@@ -874,6 +915,104 @@ pub fn update_document(
             params![document_id, next_title, next_keywords, Utc::now().to_rfc3339()],
         )
         .map_err(|error| format!("failed to update document {}: {error}", document_id))?;
+
+    get_document(app, document_id)
+}
+
+#[tauri::command]
+#[allow(clippy::needless_pass_by_value)]
+pub async fn enrich_document_metadata(app: tauri::AppHandle, id: String) -> Result<models::DocumentDetail, String> {
+    let document_id = id.trim().to_string();
+    if document_id.is_empty() {
+        return Err("id must not be empty".to_string());
+    }
+
+    let current_document = get_document(app.clone(), document_id.clone())?;
+    let transcript = current_document.transcript.trim().to_string();
+    if transcript.is_empty() {
+        return Err(format!(
+            "document {document_id} has an empty transcript and cannot be enriched"
+        ));
+    }
+
+    let fallback_title = current_document
+        .title
+        .trim()
+        .to_string()
+        .chars()
+        .take(120)
+        .collect::<String>();
+    let fallback_title = if fallback_title.trim().is_empty() {
+        format!("Document {}", current_document.id.chars().take(8).collect::<String>())
+    } else {
+        fallback_title
+    };
+
+    let (title, summary, tags, chunks) = process_document_ai(
+        &app,
+        &transcript,
+        &current_document.segments,
+        &fallback_title,
+        models::ProgressEvent::DocumentMetadata,
+    )
+    .await?;
+    let keywords_csv = parsers::serialize_keywords_csv(&tags);
+
+    let (app_data_dir, database_path) = managed_paths(&app);
+    storage::ensure_directory_layout(&app_data_dir)?;
+    storage::initialize_database(&database_path)?;
+
+    let connection = Connection::open(&database_path)
+        .map_err(|error| format!("failed to open database {}: {error}", database_path.display()))?;
+    let transaction = connection
+        .unchecked_transaction()
+        .map_err(|error| format!("failed to start metadata transaction for {document_id}: {error}"))?;
+
+    let now = Utc::now().to_rfc3339();
+    let updated_rows = transaction
+        .execute(
+            "UPDATE documents
+             SET title = ?2, summary = ?3, keywords = ?4, updated_at = ?5
+             WHERE id = ?1",
+            params![&document_id, title, summary, keywords_csv, &now],
+        )
+        .map_err(|error| format!("failed to update document metadata for {document_id}: {error}"))?;
+    if updated_rows == 0 {
+        return Err(format!("document {document_id} was not found"));
+    }
+
+    transaction
+        .execute("DELETE FROM chunks WHERE document_id = ?1", params![&document_id])
+        .map_err(|error| format!("failed to replace chunks for {document_id}: {error}"))?;
+
+    let mut chunk_statement = transaction
+        .prepare(
+            "INSERT INTO chunks (document_id, chunk_index, content, embedding, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+        )
+        .map_err(|error| format!("failed to prepare chunk update statement for {document_id}: {error}"))?;
+
+    for chunk in chunks {
+        chunk_statement
+            .execute(params![
+                &document_id,
+                chunk.chunk_index,
+                chunk.content,
+                embedding_to_blob(&chunk.embedding),
+                &now
+            ])
+            .map_err(|error| {
+                format!(
+                    "failed to persist chunk {} for {document_id}: {error}",
+                    chunk.chunk_index
+                )
+            })?;
+    }
+
+    drop(chunk_statement);
+    transaction
+        .commit()
+        .map_err(|error| format!("failed to commit metadata enrichment for {document_id}: {error}"))?;
 
     get_document(app, document_id)
 }
@@ -1356,7 +1495,14 @@ pub async fn import_audio_file(app: tauri::AppHandle, source_path: String) -> Re
         .filter(|stem| !stem.is_empty())
         .unwrap_or("Imported audio")
         .to_string();
-    let (title, summary, tags, chunks) = process_document_ai(&app, &transcript, &segments, &fallback_title).await?;
+    let (title, summary, tags, chunks) = process_document_ai(
+        &app,
+        &transcript,
+        &segments,
+        &fallback_title,
+        models::ProgressEvent::ImportMetadata,
+    )
+    .await?;
     let keywords_csv = parsers::serialize_keywords_csv(&tags);
 
     let audio_path = storage::path_for_storage(&converted_wav_path, &app_data_dir);
@@ -1454,7 +1600,14 @@ pub async fn import_recorded_audio(
     let transcript = parsers::build_transcript_text(&segments);
     let duration_seconds = parsers::max_duration_seconds(&segments);
     let fallback_title = format!("Recording {}", Utc::now().format("%Y-%m-%d %H:%M UTC"));
-    let (title, summary, tags, chunks) = process_document_ai(&app, &transcript, &segments, &fallback_title).await?;
+    let (title, summary, tags, chunks) = process_document_ai(
+        &app,
+        &transcript,
+        &segments,
+        &fallback_title,
+        models::ProgressEvent::ImportMetadata,
+    )
+    .await?;
     let keywords_csv = parsers::serialize_keywords_csv(&tags);
 
     let audio_path = storage::path_for_storage(&converted_wav_path, &app_data_dir);

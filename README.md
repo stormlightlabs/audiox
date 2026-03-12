@@ -3,6 +3,8 @@
 
 A desktop app that transcribes audio locally with [whisper.cpp](https://github.com/ggerganov/whisper.cpp) and builds a searchable document library using [Ollama](https://ollama.com) models.
 
+![Library View](docs/library-view.png)
+
 ## Features
 
 - **Audio import** — Import mp3, m4a, wav, flac, ogg, opus, or webm files
@@ -12,6 +14,8 @@ A desktop app that transcribes audio locally with [whisper.cpp](https://github.c
 - **Semantic search** — Natural language search across all documents via embeddings
 - **Document library** — Browse, sort, filter, and manage transcribed documents
 - **Subtitle generation** — SRT and VTT files generated alongside transcripts
+
+![Document view with metadata and transcript](docs/document-view.png)
 
 ## Tech Stack
 

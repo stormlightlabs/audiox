@@ -1,11 +1,17 @@
 import { normalizeError } from "$/errors";
 import { formatDate, formatDuration, formatTimestamp } from "$/format-utils";
-import { useParams, useSearchParams } from "@solidjs/router";
+import type { ProgressStatus } from "$/types";
+import { A, useParams, useSearchParams } from "@solidjs/router";
 import { invoke } from "@tauri-apps/api/core";
-import { createEffect, createSignal, For, onCleanup, Show } from "solid-js";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import * as logger from "@tauri-apps/plugin-log";
+import { createEffect, createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import { ViewScaffold } from "./ViewScaffold";
 
+const DOCUMENT_METADATA_PROGRESS_EVENT = "document://metadata-progress";
+
 type TranscriptSegment = { startMs: number; endMs: number; text: string };
+type MetadataProgress = { status: ProgressStatus; message: string; percent: number };
 
 type DocumentDetail = {
   id: string;
@@ -93,6 +99,16 @@ function LoadingSkeleton() {
   );
 }
 
+function ProgressBar(props: { percent: number }) {
+  return (
+    <div class="h-2 overflow-hidden rounded-full border border-overlay bg-surface/50">
+      <div
+        class="h-full rounded-full bg-accent/75 transition-[width] duration-200"
+        style={{ width: `${Math.max(0, Math.min(100, props.percent))}%` }} />
+    </div>
+  );
+}
+
 export function DocumentView() {
   const params = useParams<{ id?: string }>();
   const [searchParams] = useSearchParams<{ segment?: string; q?: string }>();
@@ -104,6 +120,9 @@ export function DocumentView() {
   const [isSaving, setIsSaving] = createSignal(false);
   const [saveMessage, setSaveMessage] = createSignal<string | null>(null);
   const [saveError, setSaveError] = createSignal<string | null>(null);
+  const [isEnriching, setIsEnriching] = createSignal(false);
+  const [enrichmentProgress, setEnrichmentProgress] = createSignal<MetadataProgress | null>(null);
+  const [enrichmentError, setEnrichmentError] = createSignal<string | null>(null);
   const [focusedSegmentKey, setFocusedSegmentKey] = createSignal<string | null>(null);
 
   const segmentElements = new Map<string, HTMLDivElement>();
@@ -126,6 +145,9 @@ export function DocumentView() {
       setError(null);
       setSaveMessage(null);
       setSaveError(null);
+      setEnrichmentProgress(null);
+      setEnrichmentError(null);
+      setIsEnriching(false);
       try {
         const result = await invoke<DocumentDetail>("get_document", { id });
         setDocument(result);
@@ -143,6 +165,7 @@ export function DocumentView() {
       setDraftTitle("");
       setDraftTags("");
       setSaveError(null);
+      setEnrichmentError(null);
       segmentElements.clear();
       return;
     }
@@ -195,6 +218,27 @@ export function DocumentView() {
     }
   });
 
+  onMount(() => {
+    let unlistenMetadata: UnlistenFn | undefined;
+
+    void (async () => {
+      try {
+        unlistenMetadata = await listen<MetadataProgress>(DOCUMENT_METADATA_PROGRESS_EVENT, (event) => {
+          setEnrichmentProgress(event.payload);
+        });
+      } catch (error) {
+        logger.warn("Event channels are unavailable in plain browser contexts.");
+        logger.error("Failed to listen for metadata progress events", { keyValues: { error: normalizeError(error) } });
+      }
+    })();
+
+    onCleanup(() => {
+      if (unlistenMetadata) {
+        void unlistenMetadata();
+      }
+    });
+  });
+
   const hasUnsavedChanges = () => {
     const currentDocument = document();
     if (!currentDocument) {
@@ -237,11 +281,49 @@ export function DocumentView() {
     }
   };
 
+  const runGemmaEnrichment = async () => {
+    const currentDocument = document();
+    if (!currentDocument) {
+      return;
+    }
+
+    if (hasUnsavedChanges()) {
+      setEnrichmentError("Save title/tags changes before running Gemma enrichment.");
+      return;
+    }
+
+    setIsEnriching(true);
+    setEnrichmentError(null);
+    setEnrichmentProgress(null);
+    setSaveMessage(null);
+
+    try {
+      const updated = await invoke<DocumentDetail>("enrich_document_metadata", { id: currentDocument.id });
+      setDocument(updated);
+      setEnrichmentProgress((current) => {
+        if (current) {
+          return current;
+        }
+        return { status: "completed", message: "Gemma enrichment complete.", percent: 100 };
+      });
+    } catch (enrichmentFailure) {
+      setEnrichmentError(normalizeError(enrichmentFailure));
+    } finally {
+      setIsEnriching(false);
+    }
+  };
+
   return (
     <ViewScaffold
       eyebrow="Document"
       title={document()?.title ?? "Document reader"}
       description="Review transcript output, AI-generated metadata, and update title/tags as needed.">
+      <nav aria-label="Breadcrumb" class="flex flex-wrap items-center gap-2 px-4 text-xs text-subtext">
+        <A href="/library" class="transition hover:text-text">Library</A>
+        <span aria-hidden="true" class="text-subtext/70">/</span>
+        <span class="max-w-md truncate text-text">{document()?.title ?? "Document"}</span>
+      </nav>
+
       <section class="space-y-4 rounded-3xl border border-overlay bg-elevation/85 p-6">
         <Show when={!params.id}>
           <p class="rounded-xl border border-overlay bg-surface/40 p-4 text-sm text-subtext">
@@ -331,10 +413,48 @@ export function DocumentView() {
                     disabled={!hasUnsavedChanges() || isSaving()}>
                     {isSaving() ? "Saving..." : "Save title/tags"}
                   </button>
+
+                  <button
+                    type="button"
+                    class="rounded-xl border border-overlay px-3 py-1.5 text-xs font-semibold text-subtext transition hover:border-accent/35 hover:text-text disabled:cursor-not-allowed disabled:opacity-60"
+                    onClick={() => {
+                      void runGemmaEnrichment();
+                    }}
+                    disabled={isSaving() || isEnriching() || hasUnsavedChanges()}>
+                    {isEnriching()
+                      ? "Running Gemma..."
+                      : (currentDocument().summary?.trim() || currentDocument().tags.length > 0
+                        ? "Re-run Gemma enrichment"
+                        : "Run Gemma enrichment")}
+                  </button>
+
                   <Show when={saveMessage()}>{(message) => <span class="text-xs text-subtext">{message()}</span>}</Show>
                 </div>
 
+                <Show when={enrichmentProgress()}>
+                  {(progress) => (
+                    <article class="space-y-2 rounded-2xl border border-overlay bg-surface/45 p-4">
+                      <div class="flex items-center justify-between gap-3">
+                        <p class="text-sm font-semibold text-text">gemma enrichment + embeddings</p>
+                        <span class="text-xs font-semibold tracking-[0.16em] text-subtext uppercase">
+                          {progress().status}
+                        </span>
+                      </div>
+                      <p class="text-xs text-subtext">{progress().message}</p>
+                      <ProgressBar percent={progress().percent} />
+                    </article>
+                  )}
+                </Show>
+
                 <Show when={saveError()}>
+                  {(message) => (
+                    <p role="alert" class="rounded-xl border border-accent/50 bg-accent/10 p-3 text-sm text-text">
+                      {message()}
+                    </p>
+                  )}
+                </Show>
+
+                <Show when={enrichmentError()}>
                   {(message) => (
                     <p role="alert" class="rounded-xl border border-accent/50 bg-accent/10 p-3 text-sm text-text">
                       {message()}

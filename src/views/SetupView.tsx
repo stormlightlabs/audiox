@@ -4,7 +4,7 @@ import { useNavigate } from "@solidjs/router";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import * as logger from "@tauri-apps/plugin-log";
-import { createSignal, For, onCleanup, onMount, Show } from "solid-js";
+import { createSignal, For, Match, onCleanup, onMount, Show, Switch } from "solid-js";
 import { createStore } from "solid-js/store";
 import { type SetupStatus, useAppContext } from "../state/AppContext";
 import { ViewScaffold } from "./ViewScaffold";
@@ -178,25 +178,25 @@ function statusClass(status: StepStatus): string {
 }
 
 function StatusGlyph(props: { status: StepStatus }) {
-  switch (props.status) {
-    case "pass": {
-      return <span class="text-accent">✓</span>;
-    }
-    case "running": {
-      return (
+  return (
+    <Switch>
+      <Match when={props.status === "pass"}>
+        <span class="text-accent">✓</span>
+      </Match>
+      <Match when={props.status === "running"}>
         <span class="inline-block size-4 rounded-full border-2 border-accent/40 border-t-accent align-middle animate-spin" />
-      );
-    }
-    case "fail": {
-      return <span class="text-text">✕</span>;
-    }
-    case "blocked": {
-      return <span class="text-subtext">⏸</span>;
-    }
-    default: {
-      return <span class="text-subtext">•</span>;
-    }
-  }
+      </Match>
+      <Match when={props.status === "fail"}>
+        <span class="text-text">✕</span>
+      </Match>
+      <Match when={props.status === "blocked"}>
+        <span class="text-subtext">⏸</span>
+      </Match>
+      <Match when={props.status === "pending"}>
+        <span class="text-subtext">•</span>
+      </Match>
+    </Switch>
+  );
 }
 
 function StepCard(props: { step: SetupStep }) {
@@ -401,9 +401,7 @@ export function SetupView() {
         });
       } catch (error) {
         logger.warn("Events are unavailable in plain browser contexts.");
-        logger.error("error, preflight check failure", {
-          keyValues: { error: error instanceof Error ? error.message : String(error) },
-        });
+        logger.error("error, preflight check failure", { keyValues: { error: normalizeError(error) } });
       }
 
       const status = await refreshSetup();

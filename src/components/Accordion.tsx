@@ -13,18 +13,18 @@ type AccordionProps = ParentProps & {
 
 export function Accordion(props: AccordionProps) {
   const [isOpen, setIsOpen] = createSignal(props.defaultOpen ?? false);
-  const baseId = props.id ?? createUniqueId();
-  const buttonId = `${baseId}-trigger`;
-  const panelId = `${baseId}-panel`;
+  const baseId = () => props.id ?? createUniqueId();
+  const buttonId = () => `${baseId()}-trigger`;
+  const panelId = () => `${baseId()}-panel`;
 
   return (
     <section class={`w-full ${props.class ?? ""}`}>
       <button
-        id={buttonId}
+        id={buttonId()}
         type="button"
         class={`flex w-full items-center justify-between gap-3 ${props.headerClass ?? ""}`}
         aria-expanded={isOpen()}
-        aria-controls={panelId}
+        aria-controls={panelId()}
         onClick={() => {
           setIsOpen((open) => !open);
         }}>
@@ -47,9 +47,9 @@ export function Accordion(props: AccordionProps) {
       <Presence>
         <Show when={isOpen()}>
           <Motion.div
-            id={panelId}
+            id={panelId()}
             role="region"
-            aria-labelledby={buttonId}
+            aria-labelledby={buttonId()}
             class="overflow-hidden"
             initial={{ opacity: 0, height: 0, y: -4 }}
             animate={{ opacity: 1, height: "auto", y: 0 }}

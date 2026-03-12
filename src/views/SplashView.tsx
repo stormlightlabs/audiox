@@ -1,5 +1,5 @@
 import { useNavigate } from "@solidjs/router";
-import { createEffect, For, onCleanup, Show } from "solid-js";
+import { createEffect, For, Match, onCleanup, Show, Switch } from "solid-js";
 import { Motion } from "solid-motionone";
 import { Accordion } from "../components/Accordion";
 import {
@@ -64,26 +64,25 @@ function statusLabel(status: CheckDisplayStatus, running: boolean): string {
 }
 
 function StatusGlyph(props: { status: CheckDisplayStatus; running: boolean }) {
-  if (props.running) {
-    return (
-      <span class="inline-block size-4 rounded-full border-2 border-accent/40 border-t-accent align-middle animate-spin" />
-    );
-  }
-
-  switch (props.status) {
-    case "pass": {
-      return <span class="text-accent">✓</span>;
-    }
-    case "warn": {
-      return <span class="text-subtext">!</span>;
-    }
-    case "fail": {
-      return <span class="text-text">✕</span>;
-    }
-    default: {
-      return <span class="text-subtext">•</span>;
-    }
-  }
+  return (
+    <Switch>
+      <Match when={props.running}>
+        <span class="inline-block size-4 rounded-full border-2 border-accent/40 border-t-accent align-middle animate-spin" />
+      </Match>
+      <Match when={props.status === "pass"}>
+        <span class="text-accent">✓</span>
+      </Match>
+      <Match when={props.status === "warn"}>
+        <span class="text-subtext">!</span>
+      </Match>
+      <Match when={props.status === "fail"}>
+        <span class="text-text">✕</span>
+      </Match>
+      <Match when={props.status === "pending"}>
+        <span class="text-subtext">•</span>
+      </Match>
+    </Switch>
+  );
 }
 
 function GuidancePanel(props: { messages: string[] }) {

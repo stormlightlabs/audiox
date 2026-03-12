@@ -97,7 +97,7 @@ function RecorderControls(props: RecorderControlsProps) {
         <button
           type="button"
           class="rounded-xl bg-accent px-4 py-2 text-sm font-semibold text-surface transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-60"
-          onClick={props.onStart}
+          onClick={() => props.onStart()}
           disabled={props.phase !== "idle"}>
           Start recording
         </button>
@@ -105,7 +105,7 @@ function RecorderControls(props: RecorderControlsProps) {
         <button
           type="button"
           class="rounded-xl border border-overlay px-4 py-2 text-sm font-semibold text-text transition hover:border-accent/35 disabled:cursor-not-allowed disabled:opacity-60"
-          onClick={props.onPause}
+          onClick={() => props.onPause()}
           disabled={props.phase !== "recording"}>
           Pause
         </button>
@@ -113,7 +113,7 @@ function RecorderControls(props: RecorderControlsProps) {
         <button
           type="button"
           class="rounded-xl border border-overlay px-4 py-2 text-sm font-semibold text-text transition hover:border-accent/35 disabled:cursor-not-allowed disabled:opacity-60"
-          onClick={props.onResume}
+          onClick={() => props.onResume()}
           disabled={props.phase !== "paused"}>
           Resume
         </button>
@@ -121,7 +121,7 @@ function RecorderControls(props: RecorderControlsProps) {
         <button
           type="button"
           class="rounded-xl border border-red-400/70 bg-red-500/10 px-4 py-2 text-sm font-semibold text-red-200 transition hover:border-red-300 disabled:cursor-not-allowed disabled:opacity-60"
-          onClick={props.onStop}
+          onClick={() => props.onStop()}
           disabled={props.phase !== "recording" && props.phase !== "paused"}>
           Stop
         </button>
@@ -458,94 +458,94 @@ export function RecordView() {
     })();
   });
 
-  if (!isSupported()) {
-    return (
+  return (
+    <Show
+      when={isSupported()}
+      fallback={
+        <ViewScaffold
+          eyebrow="Capture"
+          title="Microphone recording"
+          description="Capture speech directly from your microphone, monitor a live waveform, then process the recording through ffmpeg + whisper into a library document.">
+          <section class="space-y-4 rounded-3xl border border-overlay bg-elevation/85 p-6">
+            <p role="alert" class="rounded-xl border border-accent/50 bg-accent/10 p-3 text-sm text-text">
+              This view requires the native Tauri runtime.
+            </p>
+          </section>
+        </ViewScaffold>
+      }>
       <ViewScaffold
         eyebrow="Capture"
         title="Microphone recording"
         description="Capture speech directly from your microphone, monitor a live waveform, then process the recording through ffmpeg + whisper into a library document.">
         <section class="space-y-4 rounded-3xl border border-overlay bg-elevation/85 p-6">
-          <p role="alert" class="rounded-xl border border-accent/50 bg-accent/10 p-3 text-sm text-text">
-            This view requires the native Tauri runtime.
-          </p>
-        </section>
-      </ViewScaffold>
-    );
-  }
+          <RecorderControls
+            phase={phase()}
+            elapsedMs={elapsedMs()}
+            onStart={() => {
+              void startRecording();
+            }}
+            onPause={() => {
+              void pauseRecording();
+            }}
+            onResume={() => {
+              void resumeRecording();
+            }}
+            onStop={() => {
+              void stopRecording();
+            }}
+            setCanvasRef={(element) => {
+              waveformCanvas = element;
+            }} />
 
-  return (
-    <ViewScaffold
-      eyebrow="Capture"
-      title="Microphone recording"
-      description="Capture speech directly from your microphone, monitor a live waveform, then process the recording through ffmpeg + whisper into a library document.">
-      <section class="space-y-4 rounded-3xl border border-overlay bg-elevation/85 p-6">
-        <RecorderControls
-          phase={phase()}
-          elapsedMs={elapsedMs()}
-          onStart={() => {
-            void startRecording();
-          }}
-          onPause={() => {
-            void pauseRecording();
-          }}
-          onResume={() => {
-            void resumeRecording();
-          }}
-          onStop={() => {
-            void stopRecording();
-          }}
-          setCanvasRef={(element) => {
-            waveformCanvas = element;
-          }} />
-
-        {phase() === "processing" && (
-          <p class="rounded-xl border border-overlay bg-surface/35 p-3 text-sm text-subtext">
-            Processing recording with ffmpeg, whisper, and Gemma enrichment.
-          </p>
-        )}
-        <Show when={conversionProgress()}>
-          {(progress) => (
-            <PipelineProgressCard
-              title="ffmpeg conversion"
-              status={progress().status}
-              message={progress().message}
-              percent={progress().percent} />
-          )}
-        </Show>
-        <Show when={transcriptionProgress()}>
-          {(progress) => (
-            <PipelineProgressCard
-              title="whisper transcription"
-              status={progress().status}
-              message={progress().message}
-              percent={progress().percent} />
-          )}
-        </Show>
-        <Show when={metadataProgress()}>
-          {(progress) => (
-            <PipelineProgressCard
-              title="gemma enrichment + embeddings"
-              status={progress().status}
-              message={progress().message}
-              percent={progress().percent} />
-          )}
-        </Show>
-        <Show when={lastDocument()}>
-          {(document) => (
-            <article class="rounded-2xl border border-overlay bg-surface/35 p-4">
-              <p class="text-sm font-semibold text-text">{document().title} saved.</p>
-              <p class="mt-1 text-xs text-subtext">{document().segments.length} timestamped segments captured.</p>
-            </article>
-          )}
-        </Show>
-        <Show when={error()}>
-          {(message) => (
-            <p role="alert" class="rounded-xl border border-accent/50 bg-accent/10 p-3 text-sm text-text">
-              {message()}
+          {phase() === "processing" && (
+            <p class="rounded-xl border border-overlay bg-surface/35 p-3 text-sm text-subtext">
+              Processing recording with ffmpeg, whisper, and Gemma enrichment.
             </p>
           )}
-        </Show>
-      </section>
-    </ViewScaffold>
+          <Show when={conversionProgress()}>
+            {(progress) => (
+              <PipelineProgressCard
+                title="ffmpeg conversion"
+                status={progress().status}
+                message={progress().message}
+                percent={progress().percent} />
+            )}
+          </Show>
+          <Show when={transcriptionProgress()}>
+            {(progress) => (
+              <PipelineProgressCard
+                title="whisper transcription"
+                status={progress().status}
+                message={progress().message}
+                percent={progress().percent} />
+            )}
+          </Show>
+          <Show when={metadataProgress()}>
+            {(progress) => (
+              <PipelineProgressCard
+                title="gemma enrichment + embeddings"
+                status={progress().status}
+                message={progress().message}
+                percent={progress().percent} />
+            )}
+          </Show>
+          <Show when={lastDocument()}>
+            {(document) => (
+              <article class="rounded-2xl border border-overlay bg-surface/35 p-4">
+                <p class="text-sm font-semibold text-text">{document().title} saved.</p>
+                <p class="mt-1 text-xs text-subtext">{document().segments.length} timestamped segments captured.</p>
+              </article>
+            )}
+          </Show>
+          <Show when={error()}>
+            {(message) => (
+              <p role="alert" class="rounded-xl border border-accent/50 bg-accent/10 p-3 text-sm text-text">
+                {message()}
+              </p>
+            )}
+          </Show>
+        </section>
+      </ViewScaffold>
+    </Show>
   );
 }

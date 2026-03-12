@@ -1,8 +1,11 @@
 import { A, Navigate, Route, Router, useLocation, useNavigate } from "@solidjs/router";
+import { invoke } from "@tauri-apps/api/core";
+import * as logger from "@tauri-apps/plugin-log";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { createEffect, createSignal, For, onCleanup, onMount, type ParentProps, Show } from "solid-js";
 import { Motion, Presence } from "solid-motionone";
 import { Accordion } from "./components/Accordion";
+import { normalizeError } from "./errors";
 import { AppProvider, PREFLIGHT_CHECK_ORDER, useAppContext } from "./state/AppContext";
 import { DocumentView } from "./views/DocumentView";
 import { ImportView } from "./views/ImportView";
@@ -28,8 +31,17 @@ const fundingLinks: FundingLink[] = [
     url: "https://github.com/sponsors/desertthunder",
     description: "Sponsor ongoing open-source development",
   },
-  { name: "Ko-fi", url: "https://ko-fi.com/desertthunder", description: "Buy the project a coffee" },
+  { name: "Ko-fi", url: "https://ko-fi.com/desertthunder", description: "Buy me a coffee" },
+  { name: "Source Code", url: "https://github.com/stormlightlabs/audiox", description: "View the source code" },
 ];
+
+async function openFundingLink(url: string) {
+  try {
+    await openUrl(url);
+  } catch (error) {
+    logger.warn(`Failed to open ${url}`, { keyValues: { error: normalizeError(error) } });
+  }
+}
 
 function windowTitleForPath(pathname: string): string {
   if (pathname === "/splash") {
@@ -56,18 +68,40 @@ function windowTitleForPath(pathname: string): string {
   return "Audio X";
 }
 
+function isTauriRuntime(): boolean {
+  return Boolean((globalThis as typeof globalThis & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__);
+}
+
+function SidebarToggle(props: { sidebarOpen: boolean; onToggleSidebar: () => void }) {
+  return (
+    <button
+      type="button"
+      class="rounded-lg border border-overlay bg-surface/35 px-3 py-1.5 text-xs font-semibold text-subtext transition hover:border-accent/40 hover:text-text"
+      onClick={() => props.onToggleSidebar()}>
+      <Show
+        when={props.sidebarOpen}
+        fallback={
+          <span class="flex items-center">
+            <span class="sr-only">Hide navigation</span>
+            <i class="i-bi-chevron-bar-right w-4 h-4" />
+          </span>
+        }>
+        <span class="flex items-center">
+          <span class="sr-only">Show navigation</span>
+          <i class="i-bi-chevron-bar-left w-4 h-4" />
+        </span>
+      </Show>
+    </button>
+  );
+}
+
 function StatusBar(props: { sidebarOpen: boolean; onToggleSidebar: () => void }) {
   const { state } = useAppContext();
   return (
     <footer class="fixed inset-x-0 bottom-0 z-40 h-12 border-t border-overlay bg-black/95 backdrop-blur">
       <div class="mx-auto flex h-full w-full flex-wrap items-center justify-between gap-4 px-2 md:px-4">
         <div class="flex flex-wrap items-center gap-2">
-          <button
-            type="button"
-            class="rounded-lg border border-overlay bg-surface/35 px-3 py-1.5 text-xs font-semibold text-subtext transition hover:border-accent/40 hover:text-text"
-            onClick={props.onToggleSidebar}>
-            {props.sidebarOpen ? "Hide navigation" : "Show navigation"}
-          </button>
+          <SidebarToggle {...props} />
           <A
             href="/library"
             class="rounded-lg border border-overlay/70 bg-surface/30 px-3 py-1.5 text-xs font-semibold text-subtext transition hover:border-accent/40 hover:text-text"
@@ -97,14 +131,6 @@ function StatusBar(props: { sidebarOpen: boolean; onToggleSidebar: () => void })
 }
 
 function SideNavigation() {
-  const openFundingLink = async (url: string) => {
-    try {
-      await openUrl(url);
-    } catch {
-      // Ignore opener failures in browser-like test contexts.
-    }
-  };
-
   return (
     <Motion.aside
       initial={{ opacity: 0, x: -18, scale: 0.985 }}
@@ -169,7 +195,7 @@ function SideNavigation() {
         </Accordion>
 
         <div class="rounded-lg border border-overlay/70 bg-surface/20 p-3">
-          <p class="text-xs font-semibold text-text">Funding links</p>
+          <p class="text-xs font-semibold text-text">Links</p>
           <div class="mt-2 space-y-2">
             <For each={fundingLinks}>
               {(link) => (
@@ -198,10 +224,18 @@ function ShellLayout(props: ParentProps) {
   const isSplashRoute = () => location.pathname === "/splash";
 
   createEffect(() => {
-    if (typeof document === "undefined") {
+    const title = windowTitleForPath(location.pathname);
+    if (typeof document !== "undefined") {
+      document.title = title;
+    }
+
+    if (!isTauriRuntime()) {
       return;
     }
-    document.title = windowTitleForPath(location.pathname);
+
+    void invoke("set_window_title", { title }).catch((error) => {
+      logger.warn("Failed to update native window title", { keyValues: { error: normalizeError(error), title } });
+    });
   });
 
   onMount(() => {
@@ -294,6 +328,8 @@ function App() {
       <Route path="/setup" component={SetupView} />
       <Route path="/record" component={RecordView} />
       <Route path="/import" component={ImportView} />
+      {/* TODO: make these /documents & /documents/:id */}
+      {/* TODO: remove empty DocumentView */}
       <Route path="/library" component={LibraryView} />
       <Route path="/document" component={DocumentView} />
       <Route path="/document/:id" component={DocumentView} />

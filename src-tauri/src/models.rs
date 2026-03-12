@@ -17,6 +17,7 @@ pub enum ProgressEvent {
     ImportConversion,
     ImportTranscription,
     ImportMetadata,
+    DocumentMetadata,
 }
 
 impl ProgressEvent {
@@ -27,6 +28,7 @@ impl ProgressEvent {
             Self::ImportConversion => "import://conversion-progress",
             Self::ImportTranscription => "import://transcription-progress",
             Self::ImportMetadata => "import://metadata-progress",
+            Self::DocumentMetadata => "document://metadata-progress",
         }
     }
 }

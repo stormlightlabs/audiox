@@ -1,6 +1,6 @@
 import { normalizeError } from "$/errors";
 import { invoke } from "@tauri-apps/api/core";
-import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { EventCallback, listen, type UnlistenFn } from "@tauri-apps/api/event";
 import * as logger from "@tauri-apps/plugin-log";
 import { createContext, onCleanup, onMount, type ParentProps, useContext } from "solid-js";
 import { createStore } from "solid-js/store";
@@ -126,26 +126,27 @@ export function AppProvider(props: ParentProps) {
     setState("startupFlowActive", false);
   };
 
+  const handlePreflightEvent: EventCallback<PreflightCheckDetail> = (event) => {
+    const detail = event.payload;
+    setState("checklist", detail.check, { status: detail.status, message: detail.message });
+    setState("completedChecks", countCompletedChecks(state.checklist));
+  };
+
   onMount(() => {
     let unlisten: UnlistenFn | undefined;
     let disposed = false;
 
     void (async () => {
       try {
-        unlisten = await listen<PreflightCheckDetail>(PREFLIGHT_EVENT, (event) => {
-          const detail = event.payload;
-          setState("checklist", detail.check, { status: detail.status, message: detail.message });
-          setState("completedChecks", countCompletedChecks(state.checklist));
-        });
+        unlisten = await listen<PreflightCheckDetail>(PREFLIGHT_EVENT, handlePreflightEvent);
+
         if (disposed && unlisten) {
           await unlisten();
           unlisten = undefined;
         }
       } catch (error) {
         logger.warn("Event channel may be unavailable in plain browser contexts.");
-        logger.error("error, preflight check failure", {
-          keyValues: { error: error instanceof Error ? error.message : String(error) },
-        });
+        logger.error("error, preflight check failure", { keyValues: { error: normalizeError(error) } });
       }
 
       if (!disposed) {
