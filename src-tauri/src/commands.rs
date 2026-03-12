@@ -6,6 +6,7 @@ use std::cmp::Ordering;
 use std::collections::HashSet;
 use std::path::Path;
 use std::time::Duration;
+use tauri::Emitter;
 use uuid::Uuid;
 
 fn recording_extension_for_mime(mime_type: Option<&str>) -> &'static str {
@@ -42,6 +43,41 @@ struct GeneratedMetadata {
     tags: Vec<String>,
 }
 
+#[derive(Clone, Copy)]
+enum MaxAttempts {
+    Transcription,
+    Metadata,
+}
+
+impl From<MaxAttempts> for usize {
+    fn from(val: MaxAttempts) -> Self {
+        match val {
+            MaxAttempts::Transcription => 3,
+            MaxAttempts::Metadata => 3,
+        }
+    }
+}
+
+impl MaxAttempts {
+    pub fn value(self) -> usize {
+        self.into()
+    }
+}
+
+impl std::fmt::Display for MaxAttempts {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = format!("{}", self.value());
+        f.write_str(s.as_str())
+    }
+}
+
+const RETRY_BASE_DELAY_MS: u64 = 500;
+
+fn retry_delay(attempt: usize) -> Duration {
+    let multiplier = u64::try_from(attempt).unwrap_or(1);
+    Duration::from_millis(RETRY_BASE_DELAY_MS.saturating_mul(multiplier))
+}
+
 fn fallback_summary(transcript: &str) -> Option<String> {
     let cleaned = transcript.split_whitespace().collect::<Vec<_>>().join(" ");
     if cleaned.is_empty() {
@@ -56,6 +92,7 @@ fn fallback_summary(transcript: &str) -> Option<String> {
     Some(format!("{}...", cleaned.chars().take(237).collect::<String>()))
 }
 
+/// TODO: embed this with [include_str!] or [include_bytes!]
 fn metadata_prompt(transcript: &str) -> String {
     let clipped_transcript = transcript.chars().take(16_000).collect::<String>();
     format!(
@@ -153,6 +190,171 @@ fn parse_embed_response(payload: &Value) -> Result<Vec<Vec<f32>>, String> {
     }
 
     Err("ollama embed response did not include embeddings".to_string())
+}
+
+async fn resolve_generate_model_name() -> String {
+    match bootstrap::fetch_ollama_model_names().await {
+        Ok(model_names) => {
+            if let Some(model_name) = parsers::select_ollama_generate_model(&model_names) {
+                if model_name != models::OllamaModel::GenerateDefault.as_str() {
+                    log::info!(
+                        "using Ollama model '{}' for metadata generation (default '{}' unavailable)",
+                        model_name,
+                        models::OllamaModel::GenerateDefault.as_str()
+                    );
+                }
+                model_name
+            } else {
+                log::warn!(
+                    "no installed '{}' model variants detected; falling back to '{}'",
+                    models::OllamaModel::GenerateFamily.as_str(),
+                    models::OllamaModel::GenerateDefault.as_str()
+                );
+                models::OllamaModel::GenerateDefault.to_string()
+            }
+        }
+        Err(error) => {
+            log::warn!(
+                "failed to fetch Ollama model tags before metadata generation: {}; falling back to '{}'",
+                error,
+                models::OllamaModel::GenerateDefault.as_str()
+            );
+            models::OllamaModel::GenerateDefault.to_string()
+        }
+    }
+}
+
+fn emit_metadata_progress(app: &tauri::AppHandle, status: &str, message: impl Into<String>, percent: f64) {
+    let payload = models::TranscriptionProgress {
+        status: status.to_string(),
+        message: message.into(),
+        percent: percent.clamp(0.0, 100.0),
+    };
+    let _ = app.emit(models::ProgressEvent::ImportMetadata.as_str(), payload);
+}
+
+async fn generate_metadata_once(
+    client: &reqwest::Client, transcript: &str, generate_model: &str,
+) -> Result<GeneratedMetadata, String> {
+    let generation_response = client
+        .post(models::OllamaUrl::Generate.as_str())
+        .json(&serde_json::json!({
+            "model": generate_model,
+            "prompt": metadata_prompt(transcript),
+            "stream": false
+        }))
+        .send()
+        .await
+        .map_err(|error| format!("failed to call Ollama generate endpoint with model '{generate_model}': {error}"))?;
+
+    if !generation_response.status().is_success() {
+        let status = generation_response.status();
+        let body = generation_response.text().await.unwrap_or_default();
+        return Err(format!(
+            "ollama metadata generation failed for model '{generate_model}' with status {status}: {body}"
+        ));
+    }
+
+    let generation_payload = generation_response
+        .json::<Value>()
+        .await
+        .map_err(|error| format!("failed to parse ollama generate response for model '{generate_model}': {error}"))?;
+    let generated_text = generation_payload
+        .get("response")
+        .and_then(Value::as_str)
+        .ok_or_else(|| format!("ollama generate response for model '{generate_model}' did not include text output"))?;
+    Ok(parse_generated_metadata(generated_text))
+}
+
+async fn generate_metadata_with_retry(
+    app: &tauri::AppHandle, client: &reqwest::Client, transcript: &str,
+) -> Result<GeneratedMetadata, String> {
+    let mut last_error = "metadata generation did not run".to_string();
+
+    for attempt in 1..=MaxAttempts::Metadata.value() {
+        emit_metadata_progress(
+            app,
+            "running",
+            format!(
+                "Generating title, summary, and tags with Ollama (attempt {attempt}/{})...",
+                MaxAttempts::Metadata.value()
+            ),
+            20.0 + ((attempt.saturating_sub(1) as f64) * 20.0),
+        );
+        let generate_model = resolve_generate_model_name().await;
+        match generate_metadata_once(client, transcript, &generate_model).await {
+            Ok(generated) => {
+                emit_metadata_progress(app, "completed", "Metadata generation complete.", 100.0);
+                return Ok(generated);
+            }
+            Err(error) => {
+                last_error = error;
+                if attempt == MaxAttempts::Metadata.value() {
+                    break;
+                }
+
+                let delay = retry_delay(attempt);
+                log::warn!(
+                    "metadata generation attempt {attempt}/{} failed (retry in {}ms): {}",
+                    MaxAttempts::Metadata.value(),
+                    delay.as_millis(),
+                    last_error
+                );
+                tokio::time::sleep(delay).await;
+            }
+        }
+    }
+
+    let final_error = format!(
+        "ollama metadata generation failed after {} attempts: {}",
+        MaxAttempts::Metadata.value(),
+        last_error
+    );
+    emit_metadata_progress(app, "error", final_error.clone(), 0.0);
+    Err(final_error)
+}
+
+fn cleanup_transcription_outputs(output_base: &Path) {
+    for extension in ["json", "srt", "vtt", "txt"] {
+        let output_path = output_base.with_extension(extension);
+        if output_path.is_file() {
+            let _ = std::fs::remove_file(output_path);
+        }
+    }
+}
+
+async fn run_whisper_transcription_with_retry(
+    app: &tauri::AppHandle, whisper_program: &str, model_path: &Path, wav_path: &Path, output_base: &Path,
+) -> Result<Vec<models::TranscriptSegment>, String> {
+    let mut last_error = "transcription did not run".to_string();
+
+    for attempt in 1..=MaxAttempts::Transcription.value() {
+        cleanup_transcription_outputs(output_base);
+        match bootstrap::run_whisper_transcription(app, whisper_program, model_path, wav_path, output_base).await {
+            Ok(segments) => return Ok(segments),
+            Err(error) => {
+                last_error = error;
+                if attempt == MaxAttempts::Transcription.value() {
+                    break;
+                }
+
+                let delay = retry_delay(attempt);
+                log::warn!(
+                    "transcription attempt {attempt}/{} failed (retry in {}ms): {}",
+                    MaxAttempts::Transcription.value(),
+                    delay.as_millis(),
+                    last_error
+                );
+                tokio::time::sleep(delay).await;
+            }
+        }
+    }
+
+    Err(format!(
+        "whisper transcription failed after {} attempts: {}",
+        MaxAttempts::Transcription.value(),
+        last_error
+    ))
 }
 
 fn managed_paths(app: &tauri::AppHandle) -> (std::path::PathBuf, std::path::PathBuf) {
@@ -340,41 +542,13 @@ fn find_matching_segment_for_chunk(
 }
 
 async fn process_document_ai(
-    transcript: &str, segments: &[models::TranscriptSegment], fallback_title: &str,
+    app: &tauri::AppHandle, transcript: &str, segments: &[models::TranscriptSegment], fallback_title: &str,
 ) -> Result<(String, Option<String>, Vec<String>, Vec<models::EmbeddedChunk>), String> {
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(120))
         .build()
         .map_err(|error| format!("failed to initialize Ollama HTTP client: {error}"))?;
-
-    let generation_response = client
-        .post(models::OLLAMA_GENERATE_URL)
-        .json(&serde_json::json!({
-            "model": models::OLLAMA_GENERATE_MODEL,
-            "prompt": metadata_prompt(transcript),
-            "stream": false
-        }))
-        .send()
-        .await
-        .map_err(|error| format!("failed to call Ollama generate endpoint: {error}"))?;
-
-    if !generation_response.status().is_success() {
-        let status = generation_response.status();
-        let body = generation_response.text().await.unwrap_or_default();
-        return Err(format!(
-            "ollama metadata generation failed with status {status}: {body}"
-        ));
-    }
-
-    let generation_payload = generation_response
-        .json::<Value>()
-        .await
-        .map_err(|error| format!("failed to parse ollama generate response: {error}"))?;
-    let generated_text = generation_payload
-        .get("response")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "ollama generate response did not include text output".to_string())?;
-    let generated = parse_generated_metadata(generated_text);
+    let generated = generate_metadata_with_retry(app, &client, transcript).await?;
 
     let title = generated
         .title
@@ -389,9 +563,9 @@ async fn process_document_ai(
     }
 
     let embed_response = client
-        .post(models::OLLAMA_EMBED_URL)
+        .post(models::OllamaUrl::Embed.as_str())
         .json(&serde_json::json!({
-            "model": models::OLLAMA_EMBED_MODEL,
+            "model": models::OllamaModel::Embed.as_str(),
             "input": &chunks
         }))
         .send()
@@ -435,7 +609,7 @@ pub async fn download_whisper_model(app: tauri::AppHandle, model: Option<String>
     storage::ensure_directory_layout(&app_data_dir)?;
 
     let model_name =
-        parsers::validate_whisper_model_name(model.as_deref().unwrap_or(models::DEFAULT_WHISPER_MODEL_NAME))?;
+        parsers::validate_whisper_model_name(model.as_deref().unwrap_or(models::WHISPER_DEFAULTS.model_name))?;
     let model_path = bootstrap::download_whisper_model_file(&app, &app_data_dir, &model_name).await?;
     storage::initialize_database(&database_path)?;
     let setup_status = bootstrap::check_setup_state(&app_data_dir).await?;
@@ -468,12 +642,13 @@ pub async fn pull_ollama_model(app: tauri::AppHandle, model: String) -> Result<(
     let client = reqwest::Client::builder()
         .build()
         .map_err(|error| format!("failed to initialize Ollama client: {error}"))?;
+    let pull_url = models::OllamaUrl::Pull.as_str();
     let mut response = client
-        .post(models::OLLAMA_PULL_URL)
+        .post(pull_url)
         .json(&serde_json::json!({ "name": model_name, "stream": true }))
         .send()
         .await
-        .map_err(|error| format!("failed to call Ollama pull API at {}: {error}", models::OLLAMA_PULL_URL))?;
+        .map_err(|error| format!("failed to call Ollama pull API at {pull_url}: {error}"))?;
 
     if !response.status().is_success() {
         let status = response.status();
@@ -806,9 +981,9 @@ pub async fn search(
         .map_err(|error| format!("failed to initialize Ollama HTTP client: {error}"))?;
 
     let embed_response = client
-        .post(models::OLLAMA_EMBED_URL)
+        .post(models::OllamaUrl::Embed.as_str())
         .json(&serde_json::json!({
-            "model": models::OLLAMA_EMBED_MODEL,
+            "model": models::OllamaModel::Embed.as_str(),
             "input": [trimmed_query]
         }))
         .send()
@@ -1154,7 +1329,7 @@ pub async fn import_audio_file(app: tauri::AppHandle, source_path: String) -> Re
 
     let subtitle_base = app_data_dir.join("subtitles").join(&document_id);
     let segments =
-        bootstrap::run_whisper_transcription(&app, &whisper_program, &model_path, &converted_wav_path, &subtitle_base)
+        run_whisper_transcription_with_retry(&app, &whisper_program, &model_path, &converted_wav_path, &subtitle_base)
             .await?;
     if segments.is_empty() {
         return Err("whisper transcription did not return any transcript segments".to_string());
@@ -1184,7 +1359,7 @@ pub async fn import_audio_file(app: tauri::AppHandle, source_path: String) -> Re
         .filter(|stem| !stem.is_empty())
         .unwrap_or("Imported audio")
         .to_string();
-    let (title, summary, tags, chunks) = process_document_ai(&transcript, &segments, &fallback_title).await?;
+    let (title, summary, tags, chunks) = process_document_ai(&app, &transcript, &segments, &fallback_title).await?;
     let keywords_csv = parsers::serialize_keywords_csv(&tags);
 
     let audio_path = storage::path_for_storage(&converted_wav_path, &app_data_dir);
@@ -1262,7 +1437,7 @@ pub async fn import_recorded_audio(
 
     let subtitle_base = app_data_dir.join("subtitles").join(&document_id);
     let segments =
-        bootstrap::run_whisper_transcription(&app, &whisper_program, &model_path, &converted_wav_path, &subtitle_base)
+        run_whisper_transcription_with_retry(&app, &whisper_program, &model_path, &converted_wav_path, &subtitle_base)
             .await?;
     if segments.is_empty() {
         return Err("whisper transcription did not return any transcript segments".to_string());
@@ -1286,7 +1461,7 @@ pub async fn import_recorded_audio(
     let transcript = parsers::build_transcript_text(&segments);
     let duration_seconds = parsers::max_duration_seconds(&segments);
     let fallback_title = format!("Recording {}", Utc::now().format("%Y-%m-%d %H:%M UTC"));
-    let (title, summary, tags, chunks) = process_document_ai(&transcript, &segments, &fallback_title).await?;
+    let (title, summary, tags, chunks) = process_document_ai(&app, &transcript, &segments, &fallback_title).await?;
     let keywords_csv = parsers::serialize_keywords_csv(&tags);
 
     let audio_path = storage::path_for_storage(&converted_wav_path, &app_data_dir);

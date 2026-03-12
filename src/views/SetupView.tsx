@@ -11,6 +11,7 @@ import { ViewScaffold } from "./ViewScaffold";
 
 const WHISPER_PROGRESS_EVENT = "setup://whisper-progress";
 const OLLAMA_PROGRESS_EVENT = "setup://ollama-progress";
+const GEMMA_REQUIREMENT = "gemma3";
 
 type StepKey = "whisper_model" | "ollama_server" | "nomic_embed_text" | "gemma";
 type StepStatus = "pending" | "running" | "pass" | "fail" | "blocked";
@@ -45,15 +46,32 @@ type OllamaProgressEvent = {
 
 const STEP_ORDER: StepKey[] = ["whisper_model", "ollama_server", "nomic_embed_text", "gemma"];
 
+function modelRequirementMatches(candidate: string, required: string): boolean {
+  const left = candidate.trim().toLowerCase();
+  const right = required.trim().toLowerCase();
+
+  if (left === right) {
+    return true;
+  }
+
+  const [leftFamily, leftTag] = left.split(":");
+  const [rightFamily, rightTag] = right.split(":");
+  if (leftFamily !== rightFamily) {
+    return false;
+  }
+
+  return !leftTag || !rightTag || leftTag === rightTag;
+}
+
 function hasModel(status: SetupStatus, model: string): boolean {
-  return !status.missing_ollama_models.includes(model);
+  return !status.missing_ollama_models.some((missing) => modelRequirementMatches(missing, model));
 }
 
 function modelToStep(modelName: string): StepKey | null {
   if (modelName.startsWith("nomic-embed-text")) {
     return "nomic_embed_text";
   }
-  if (modelName.startsWith("gemma3:4b")) {
+  if (modelName.startsWith("gemma3")) {
     return "gemma";
   }
   return null;
@@ -108,13 +126,13 @@ function buildStepMap(status: SetupStatus): Record<StepKey, SetupStep> {
     },
     gemma: {
       key: "gemma",
-      title: "gemma3:4b",
-      description: "Generation model required for title/summary/tags.",
-      status: status.ollama_server_ready ? (hasModel(status, "gemma3:4b") ? "pass" : modelStepStatus) : "blocked",
+      title: "gemma3 family",
+      description: "Any gemma3 variant is valid for title/summary/tag generation.",
+      status: status.ollama_server_ready ? (hasModel(status, GEMMA_REQUIREMENT) ? "pass" : modelStepStatus) : "blocked",
       message: status.ollama_server_ready
-        ? (hasModel(status, "gemma3:4b") ? "Model is installed." : "Model is missing and will be pulled.")
+        ? (hasModel(status, GEMMA_REQUIREMENT) ? "Model is installed." : "Model is missing and will be pulled.")
         : "Waiting for Ollama server.",
-      progress: status.ollama_server_ready && hasModel(status, "gemma3:4b") ? 100 : 0,
+      progress: status.ollama_server_ready && hasModel(status, GEMMA_REQUIREMENT) ? 100 : 0,
     },
   };
 }
@@ -251,8 +269,8 @@ export function SetupView() {
     },
     gemma: {
       key: "gemma",
-      title: "gemma3:4b",
-      description: "Generation model required for title/summary/tags.",
+      title: "gemma3 family",
+      description: "Any gemma3 variant is valid for title/summary/tag generation.",
       status: "pending",
       message: "Waiting for setup check...",
       progress: 0,

@@ -28,7 +28,8 @@ A desktop app that transcribes audio locally with [whisper.cpp](https://github.c
 - [Ollama](https://ollama.com) installed and running (`http://localhost:11434`)
 - Internet connection on first run (to download models)
 
-For development, you also need `whisper-cli`, `ffmpeg`, and `yt-dlp` on your PATH (or let `setup.sh` create sidecar wrappers that forward to them).
+> [!IMPORTANT]
+> For development, you also need `whisper-cli`, `ffmpeg`, and `yt-dlp` on your PATH (or let `setup.sh` create sidecar wrappers that forward to them).
 
 ## Getting Started
 

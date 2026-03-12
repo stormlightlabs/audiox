@@ -1,25 +1,97 @@
 //! Ollama and Whisper.cpp module
 
+use std::fmt::{Display, Formatter};
 use std::str::FromStr;
 
 use serde::Serialize;
 
 pub const REQUIRED_DIRECTORIES: [&str; 6] = ["models", "audio", "video", "subtitles", "db", "bin"];
-pub const REQUIRED_OLLAMA_MODELS: [&str; 2] = ["nomic-embed-text", "gemma3:4b"];
+pub const REQUIRED_OLLAMA_MODELS: [&str; 2] = ["nomic-embed-text", "gemma3"];
 pub const SCHEMA_VERSION: i64 = 3;
 pub const PREFLIGHT_EVENT: &str = "preflight://check";
-pub const SETUP_WHISPER_PROGRESS_EVENT: &str = "setup://whisper-progress";
-pub const SETUP_OLLAMA_PROGRESS_EVENT: &str = "setup://ollama-progress";
-pub const IMPORT_CONVERSION_PROGRESS_EVENT: &str = "import://conversion-progress";
-pub const IMPORT_TRANSCRIPTION_PROGRESS_EVENT: &str = "import://transcription-progress";
-pub const OLLAMA_TAGS_URL: &str = "http://localhost:11434/api/tags";
-pub const OLLAMA_PULL_URL: &str = "http://localhost:11434/api/pull";
-pub const OLLAMA_GENERATE_URL: &str = "http://localhost:11434/api/generate";
-pub const OLLAMA_EMBED_URL: &str = "http://localhost:11434/api/embed";
-pub const OLLAMA_GENERATE_MODEL: &str = "gemma3:4b";
-pub const OLLAMA_EMBED_MODEL: &str = "nomic-embed-text";
-pub const DEFAULT_WHISPER_MODEL_NAME: &str = "base.en";
-pub const DEFAULT_WHISPER_THREADS: usize = 4;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProgressEvent {
+    SetupWhisper,
+    SetupOllama,
+    ImportConversion,
+    ImportTranscription,
+    ImportMetadata,
+}
+
+impl ProgressEvent {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::SetupWhisper => "setup://whisper-progress",
+            Self::SetupOllama => "setup://ollama-progress",
+            Self::ImportConversion => "import://conversion-progress",
+            Self::ImportTranscription => "import://transcription-progress",
+            Self::ImportMetadata => "import://metadata-progress",
+        }
+    }
+}
+
+impl Display for ProgressEvent {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OllamaUrl {
+    Tags,
+    Pull,
+    Generate,
+    Embed,
+}
+
+impl OllamaUrl {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Tags => "http://localhost:11434/api/tags",
+            Self::Pull => "http://localhost:11434/api/pull",
+            Self::Generate => "http://localhost:11434/api/generate",
+            Self::Embed => "http://localhost:11434/api/embed",
+        }
+    }
+}
+
+impl Display for OllamaUrl {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OllamaModel {
+    GenerateFamily,
+    GenerateDefault,
+    Embed,
+}
+
+impl OllamaModel {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::GenerateFamily => "gemma3",
+            Self::GenerateDefault => "gemma3:4b",
+            Self::Embed => "nomic-embed-text",
+        }
+    }
+}
+
+impl Display for OllamaModel {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WhisperDefaults {
+    pub model_name: &'static str,
+    pub threads: usize,
+}
+
+pub const WHISPER_DEFAULTS: WhisperDefaults = WhisperDefaults { model_name: "base.en", threads: 4 };
 
 /// ~512 token chunks (rough approximation: ~0.75 words/token for English prose).
 pub const EMBEDDING_CHUNK_TARGET_WORDS: usize = 384;

@@ -1,7 +1,7 @@
 import { A, Navigate, Route, Router, useLocation, useNavigate } from "@solidjs/router";
 import { createEffect, createSignal, For, onCleanup, onMount, type ParentProps, Show } from "solid-js";
-import { Motion } from "solid-motionone";
-import { AppProvider, useAppContext } from "./state/AppContext";
+import { Motion, Presence } from "solid-motionone";
+import { AppProvider, PREFLIGHT_CHECK_ORDER, useAppContext } from "./state/AppContext";
 import { DocumentView } from "./views/DocumentView";
 import { ImportView } from "./views/ImportView";
 import { LibraryView } from "./views/LibraryView";
@@ -47,20 +47,48 @@ function windowTitleForPath(pathname: string): string {
   return "Audio X";
 }
 
-function BootStatus() {
+function StatusBar(props: { sidebarOpen: boolean; onToggleSidebar: () => void }) {
   const { state } = useAppContext();
   return (
-    <div class="rounded-2xl border border-overlay bg-raised/80 p-3">
-      <p class="text-xs font-semibold tracking-[0.2em] text-subtext uppercase">Preflight</p>
-      <p class="mt-2 text-sm text-text">{state.preflightPhase}</p>
-      <p class="mt-1 text-xs text-subtext">{state.completedChecks}/7 checks complete</p>
-    </div>
+    <footer class="fixed inset-x-0 bottom-0 z-40 border-t border-overlay bg-elevation/95 backdrop-blur">
+      <div class="mx-auto flex w-full max-w-7xl flex-wrap items-center justify-between gap-3 px-4 py-2 md:px-8">
+        <div class="flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            class="rounded-lg border border-overlay bg-surface/35 px-3 py-1.5 text-xs font-semibold text-subtext transition hover:border-accent/40 hover:text-text"
+            onClick={props.onToggleSidebar}>
+            {props.sidebarOpen ? "Hide navigation" : "Show navigation"}
+          </button>
+          <A
+            href="/splash"
+            class="rounded-lg border border-overlay/70 bg-surface/30 px-3 py-1.5 text-xs font-semibold text-subtext transition hover:border-accent/40 hover:text-text"
+            activeClass="!border-accent/60 !bg-accent/15 !text-text">
+            Splash screen
+          </A>
+          <A
+            href="/setup"
+            class="rounded-lg border border-overlay/70 bg-surface/30 px-3 py-1.5 text-xs font-semibold text-subtext transition hover:border-accent/40 hover:text-text"
+            activeClass="!border-accent/60 !bg-accent/15 !text-text">
+            Setup screen
+          </A>
+        </div>
+        <p class="text-right text-[11px] font-semibold tracking-[0.14em] text-subtext uppercase md:text-xs">
+          PREFLIGHT <span class="text-text">{state.preflightPhase}</span>{" "}
+          <span>{state.completedChecks}/{PREFLIGHT_CHECK_ORDER.length} checks complete</span>
+        </p>
+      </div>
+    </footer>
   );
 }
 
 function SideNavigation() {
   return (
-    <aside class="flex w-full flex-col gap-6 rounded-3xl border border-overlay bg-elevation/90 p-5 shadow-2xl shadow-surface/50 backdrop-blur md:w-72 md:self-stretch">
+    <Motion.aside
+      initial={{ opacity: 0, x: -18, scale: 0.985 }}
+      animate={{ opacity: 1, x: 0, scale: 1 }}
+      exit={{ opacity: 0, x: -18, scale: 0.985 }}
+      transition={{ duration: 0.22 }}
+      class="flex w-full flex-col gap-6 rounded-3xl border border-overlay bg-elevation/90 p-5 shadow-2xl shadow-surface/50 backdrop-blur md:w-72 md:self-stretch">
       <header class="space-y-2">
         <p class="font-display text-2xl tracking-wide text-text">Audio X</p>
         <p class="text-xs tracking-[0.2em] text-subtext uppercase">Desktop shell</p>
@@ -79,8 +107,7 @@ function SideNavigation() {
           )}
         </For>
       </nav>
-      <BootStatus />
-    </aside>
+    </Motion.aside>
   );
 }
 
@@ -131,30 +158,18 @@ function ShellLayout(props: ParentProps) {
   });
 
   return (
-    <div class="relative min-h-screen bg-surface px-4 py-5 text-text md:px-8 md:py-8">
+    <div class="relative min-h-screen bg-surface px-4 py-5 pb-20 text-text md:px-8 md:py-8 md:pb-24">
       <div class="absolute inset-0 -z-10 bg-[radial-gradient(circle_at_14%_12%,rgba(40,90,140,0.35),transparent_42%),radial-gradient(circle_at_88%_8%,rgba(17,31,56,0.5),transparent_45%),linear-gradient(160deg,#03050a,#070d17_55%,#05070d)]" />
       <Show
         when={isSplashRoute()}
         fallback={
-          <div class="mx-auto flex w-full max-w-7xl flex-col gap-4 md:min-h-[calc(100vh-4rem)]">
-            <div class="flex items-center justify-between rounded-2xl border border-overlay bg-elevation/70 px-3 py-2">
-              <p class="text-xs font-semibold tracking-[0.16em] text-subtext uppercase">
-                {sidebarOpen() ? "Navigation expanded" : "Navigation hidden"}
-              </p>
-              <button
-                type="button"
-                class="rounded-lg border border-overlay bg-surface/35 px-3 py-1.5 text-xs font-semibold text-subtext transition hover:border-accent/40 hover:text-text"
-                onClick={() => {
-                  setSidebarOpen((open) => !open);
-                }}>
-                {sidebarOpen() ? "Hide sidebar" : "Show sidebar"}
-              </button>
-            </div>
-
+          <div class="mx-auto flex w-full max-w-7xl flex-col gap-6 md:min-h-[calc(100vh-7rem)]">
             <div class="flex w-full flex-col gap-6 md:flex-row">
-              <Show when={sidebarOpen()}>
-                <SideNavigation />
-              </Show>
+              <Presence>
+                <Show when={sidebarOpen()}>
+                  <SideNavigation />
+                </Show>
+              </Presence>
               <main class="flex-1 rounded-3xl border border-overlay bg-elevation/60 p-6 shadow-2xl shadow-surface/50 md:p-8">
                 <Motion.div
                   initial={{ opacity: 0, y: 10 }}
@@ -166,12 +181,17 @@ function ShellLayout(props: ParentProps) {
             </div>
           </div>
         }>
-        <main class="mx-auto flex w-full max-w-5xl items-center justify-center py-6 md:min-h-[calc(100vh-4rem)]">
+        <main class="mx-auto flex w-full max-w-5xl items-center justify-center py-6 md:min-h-[calc(100vh-7rem)]">
           <Motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.25 }}>
             {props.children}
           </Motion.div>
         </main>
       </Show>
+      <StatusBar
+        sidebarOpen={sidebarOpen()}
+        onToggleSidebar={() => {
+          setSidebarOpen((open) => !open);
+        }} />
     </div>
   );
 }

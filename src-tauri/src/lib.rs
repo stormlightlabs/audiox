@@ -121,14 +121,16 @@ mod tests {
     }
 
     #[test]
-    fn matching_models_accept_tag_suffix_variants() {
+    fn matching_models_accept_gemma_family_variants() {
         assert!(parsers::model_name_matches(
             "nomic-embed-text:latest",
             "nomic-embed-text"
         ));
         assert!(parsers::model_name_matches("gemma3:4b", "gemma3:4b"));
-        assert!(parsers::model_name_matches("gemma3:latest", "gemma3:4b"));
-        assert!(!parsers::model_name_matches("gemma3:1b", "gemma3:4b"));
+        assert!(parsers::model_name_matches("gemma3:latest", "gemma3"));
+        assert!(parsers::model_name_matches("gemma3:1b", "gemma3"));
+        assert!(parsers::model_name_matches("gemma3:27b-cloud", "gemma3"));
+        assert!(!parsers::model_name_matches("gemma2:9b", "gemma3"));
     }
 
     #[cfg(unix)]

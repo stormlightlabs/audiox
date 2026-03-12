@@ -58,7 +58,7 @@ const setupPreflight = {
 const setupStatus = {
   whisper_model_ready: false,
   ollama_server_ready: false,
-  missing_ollama_models: ["nomic-embed-text", "gemma3:4b"],
+  missing_ollama_models: ["nomic-embed-text", "gemma3"],
   setup_completed: false,
   all_required_ready: false,
   guidance: ["Install Ollama and start it with `ollama serve`."],

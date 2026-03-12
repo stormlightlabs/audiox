@@ -9,6 +9,7 @@ import { ViewScaffold } from "./ViewScaffold";
 
 const IMPORT_CONVERSION_PROGRESS_EVENT = "import://conversion-progress";
 const IMPORT_TRANSCRIPTION_PROGRESS_EVENT = "import://transcription-progress";
+const IMPORT_METADATA_PROGRESS_EVENT = "import://metadata-progress";
 
 type ConversionProgress = {
   status: ProgressStatus;
@@ -19,6 +20,7 @@ type ConversionProgress = {
 };
 
 type TranscriptionProgress = { status: ProgressStatus; message: string; percent: number };
+type MetadataProgress = { status: ProgressStatus; message: string; percent: number };
 
 type ImportedDocument = {
   id: string;
@@ -51,6 +53,7 @@ export function ImportView() {
   const [selectedFilePath, setSelectedFilePath] = createSignal<string | null>(null);
   const [conversionProgress, setConversionProgress] = createSignal<ConversionProgress | null>(null);
   const [transcriptionProgress, setTranscriptionProgress] = createSignal<TranscriptionProgress | null>(null);
+  const [metadataProgress, setMetadataProgress] = createSignal<MetadataProgress | null>(null);
   const [lastImportedDocument, setLastImportedDocument] = createSignal<ImportedDocument | null>(null);
 
   const importAudio = async (sourcePath: string) => {
@@ -59,6 +62,7 @@ export function ImportView() {
     setSelectedFilePath(sourcePath);
     setConversionProgress(null);
     setTranscriptionProgress(null);
+    setMetadataProgress(null);
     setLastImportedDocument(null);
 
     try {
@@ -87,6 +91,7 @@ export function ImportView() {
   onMount(() => {
     let unlistenConversion: UnlistenFn | undefined;
     let unlistenTranscription: UnlistenFn | undefined;
+    let unlistenMetadata: UnlistenFn | undefined;
 
     void (async () => {
       try {
@@ -95,6 +100,9 @@ export function ImportView() {
         });
         unlistenTranscription = await listen<TranscriptionProgress>(IMPORT_TRANSCRIPTION_PROGRESS_EVENT, (event) => {
           setTranscriptionProgress(event.payload);
+        });
+        unlistenMetadata = await listen<MetadataProgress>(IMPORT_METADATA_PROGRESS_EVENT, (event) => {
+          setMetadataProgress(event.payload);
         });
       } catch {
         // Event channels are unavailable in plain browser contexts.
@@ -107,6 +115,9 @@ export function ImportView() {
       }
       if (unlistenTranscription) {
         void unlistenTranscription();
+      }
+      if (unlistenMetadata) {
+        void unlistenMetadata();
       }
     });
   });
@@ -159,6 +170,19 @@ export function ImportView() {
             <article class="space-y-2 rounded-2xl border border-overlay bg-surface/45 p-4">
               <div class="flex items-center justify-between gap-3">
                 <p class="text-sm font-semibold text-text">whisper transcription</p>
+                <span class="text-xs font-semibold tracking-[0.16em] text-subtext uppercase">{progress().status}</span>
+              </div>
+              <p class="text-xs text-subtext">{progress().message}</p>
+              <ProgressBar percent={progress().percent} />
+            </article>
+          )}
+        </Show>
+
+        <Show when={metadataProgress()}>
+          {(progress) => (
+            <article class="space-y-2 rounded-2xl border border-overlay bg-surface/45 p-4">
+              <div class="flex items-center justify-between gap-3">
+                <p class="text-sm font-semibold text-text">metadata generation</p>
                 <span class="text-xs font-semibold tracking-[0.16em] text-subtext uppercase">{progress().status}</span>
               </div>
               <p class="text-xs text-subtext">{progress().message}</p>

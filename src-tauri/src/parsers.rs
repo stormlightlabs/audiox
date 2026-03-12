@@ -5,7 +5,7 @@ use serde_json::Value;
 use std::collections::HashSet;
 use std::path::Path;
 
-use crate::models::{TranscriptSegment, ALLOWED_IMPORT_EXTENSIONS, REQUIRED_OLLAMA_MODELS};
+use crate::models::{OllamaModel, TranscriptSegment, ALLOWED_IMPORT_EXTENSIONS, REQUIRED_OLLAMA_MODELS};
 
 pub fn parse_ollama_model_names(payload: &Value) -> Vec<String> {
     payload
@@ -56,6 +56,55 @@ pub fn missing_required_ollama_models(models: &[String]) -> Vec<String> {
         .filter(|required| !models.iter().any(|candidate| model_name_matches(candidate, required)))
         .map(|required| required.to_string())
         .collect()
+}
+
+fn gemma_variant_priority(tag: Option<&str>) -> usize {
+    match tag {
+        None => 0,
+        Some("latest") => 0,
+        Some("270m") => 1,
+        Some("1b") => 2,
+        Some("4b") => 3,
+        Some("12b") => 4,
+        Some("27b") => 5,
+        Some("4b-cloud") => 6,
+        Some("12b-cloud") => 7,
+        Some("27b-cloud") => 8,
+        Some(tag) if tag.starts_with("latest") => 0,
+        Some(_) => 99,
+    }
+}
+
+pub fn select_ollama_generate_model(models: &[String]) -> Option<String> {
+    let mut candidates = models
+        .iter()
+        .filter_map(|model| {
+            let trimmed = model.trim();
+            if trimmed.is_empty() || !model_name_matches(trimmed, OllamaModel::GenerateFamily.as_str()) {
+                return None;
+            }
+
+            let normalized = trimmed.to_ascii_lowercase();
+            let tag = normalized.split_once(':').map(|(_, variant)| variant);
+            let priority = gemma_variant_priority(tag);
+            Some((trimmed.to_string(), normalized, priority))
+        })
+        .collect::<Vec<_>>();
+
+    if candidates.is_empty() {
+        return None;
+    }
+
+    candidates.sort_by(|left, right| {
+        let left_is_default = left.1 == OllamaModel::GenerateDefault.as_str();
+        let right_is_default = right.1 == OllamaModel::GenerateDefault.as_str();
+        right_is_default
+            .cmp(&left_is_default)
+            .then(left.2.cmp(&right.2))
+            .then(left.1.cmp(&right.1))
+    });
+
+    candidates.into_iter().map(|(original, _, _)| original).next()
 }
 
 pub fn validate_whisper_model_name(model_name: &str) -> Result<String, String> {
@@ -392,7 +441,27 @@ mod tests {
     fn detects_missing_ollama_models() {
         let models = vec!["nomic-embed-text:latest".to_string()];
         let missing = missing_required_ollama_models(&models);
-        assert_eq!(missing, vec!["gemma3:4b".to_string()]);
+        assert_eq!(missing, vec!["gemma3".to_string()]);
+    }
+
+    #[test]
+    fn selects_preferred_installed_gemma_variant() {
+        let models = vec![
+            "gemma3:12b".to_string(),
+            "gemma3:latest".to_string(),
+            "gemma3:4b-cloud".to_string(),
+        ];
+
+        let selected = select_ollama_generate_model(&models);
+        assert_eq!(selected, Some("gemma3:latest".to_string()));
+    }
+
+    #[test]
+    fn falls_back_to_any_gemma_variant_when_not_in_priority_list() {
+        let models = vec!["gemma3:experimental".to_string()];
+
+        let selected = select_ollama_generate_model(&models);
+        assert_eq!(selected, Some("gemma3:experimental".to_string()));
     }
 
     #[test]

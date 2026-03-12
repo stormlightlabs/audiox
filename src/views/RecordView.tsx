@@ -11,6 +11,7 @@ import { ViewScaffold } from "./ViewScaffold";
 
 const IMPORT_CONVERSION_PROGRESS_EVENT = "import://conversion-progress";
 const IMPORT_TRANSCRIPTION_PROGRESS_EVENT = "import://transcription-progress";
+const IMPORT_METADATA_PROGRESS_EVENT = "import://metadata-progress";
 
 type ConversionProgress = {
   status: ProgressStatus;
@@ -21,6 +22,7 @@ type ConversionProgress = {
 };
 
 type TranscriptionProgress = { status: ProgressStatus; message: string; percent: number };
+type MetadataProgress = { status: ProgressStatus; message: string; percent: number };
 
 type ImportedDocument = {
   id: string;
@@ -156,11 +158,13 @@ export function RecordView() {
   const [elapsedMs, setElapsedMs] = createSignal(0);
   const [conversionProgress, setConversionProgress] = createSignal<ConversionProgress | null>(null);
   const [transcriptionProgress, setTranscriptionProgress] = createSignal<TranscriptionProgress | null>(null);
+  const [metadataProgress, setMetadataProgress] = createSignal<MetadataProgress | null>(null);
   const [lastDocument, setLastDocument] = createSignal<ImportedDocument | null>(null);
   let waveformCanvas: HTMLCanvasElement | undefined;
 
   let unlistenConversion: UnlistenFn | undefined;
   let unlistenTranscription: UnlistenFn | undefined;
+  let unlistenMetadata: UnlistenFn | undefined;
   let mediaRecorder: MediaRecorder | null = null;
   let mediaStream: MediaStream | null = null;
   let recordedChunks: BlobPart[] = [];
@@ -308,6 +312,7 @@ export function RecordView() {
     setPhase("processing");
     setConversionProgress(null);
     setTranscriptionProgress(null);
+    setMetadataProgress(null);
     try {
       const payload = new Uint8Array(await recordingBlob.arrayBuffer());
       const imported = await invoke<ImportedDocument>("import_recorded_audio", {
@@ -376,6 +381,7 @@ export function RecordView() {
     setLastDocument(null);
     setConversionProgress(null);
     setTranscriptionProgress(null);
+    setMetadataProgress(null);
 
     const preferredDeviceId = getPreferredAudioInputDeviceId();
     const preferredConstraints = preferredDeviceId ? { deviceId: { exact: preferredDeviceId } } : true;
@@ -446,6 +452,9 @@ export function RecordView() {
         unlistenTranscription = await listen<TranscriptionProgress>(IMPORT_TRANSCRIPTION_PROGRESS_EVENT, (event) => {
           setTranscriptionProgress(event.payload);
         });
+        unlistenMetadata = await listen<MetadataProgress>(IMPORT_METADATA_PROGRESS_EVENT, (event) => {
+          setMetadataProgress(event.payload);
+        });
       } catch {
         // Event channels are unavailable in plain browser contexts.
       }
@@ -459,6 +468,9 @@ export function RecordView() {
     }
     if (unlistenTranscription) {
       void unlistenTranscription();
+    }
+    if (unlistenMetadata) {
+      void unlistenMetadata();
     }
 
     if (mediaRecorder && mediaRecorder.state !== "inactive") {
@@ -485,6 +497,7 @@ export function RecordView() {
 
   const conversion = conversionProgress();
   const transcription = transcriptionProgress();
+  const metadata = metadataProgress();
   const document = lastDocument();
   const errorMessage = error();
 
@@ -509,7 +522,7 @@ export function RecordView() {
 
         {phase() === "processing" && (
           <p class="rounded-xl border border-overlay bg-surface/35 p-3 text-sm text-subtext">
-            Processing recording with ffmpeg and whisper. Keep this view open until transcription finishes.
+            Processing recording with ffmpeg, whisper, and metadata generation.
           </p>
         )}
         {conversion && (
@@ -525,6 +538,13 @@ export function RecordView() {
             status={transcription.status}
             message={transcription.message}
             percent={transcription.percent} />
+        )}
+        {metadata && (
+          <PipelineProgressCard
+            title="metadata generation"
+            status={metadata.status}
+            message={metadata.message}
+            percent={metadata.percent} />
         )}
         {document && (
           <article class="rounded-2xl border border-overlay bg-surface/35 p-4">

@@ -107,7 +107,7 @@ impl FileStore {
 
     pub fn resolve_whisper_model_path(&self) -> Result<PathBuf, String> {
         let model_dir = self.app_data_dir.join("models");
-        let preferred = model_dir.join(parsers::whisper_model_file_name(models::DEFAULT_WHISPER_MODEL_NAME));
+        let preferred = model_dir.join(parsers::whisper_model_file_name(models::WHISPER_DEFAULTS.model_name));
         if preferred.is_file() {
             return Ok(preferred);
         }
@@ -131,7 +131,7 @@ impl FileStore {
         Err(format!(
             "no whisper model file found in {}. Run setup to download {}.",
             model_dir.display(),
-            parsers::whisper_model_file_name(models::DEFAULT_WHISPER_MODEL_NAME)
+            parsers::whisper_model_file_name(models::WHISPER_DEFAULTS.model_name)
         ))
     }
 

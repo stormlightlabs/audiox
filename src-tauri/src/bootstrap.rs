@@ -16,11 +16,9 @@ use tauri::Emitter;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 
 use crate::models::{
-    CheckStatus, ConversionProgress, OllamaPullProgress, PreflightCheck, PreflightCheckDetail, PreflightResult,
-    RuntimeBinarySpec, SetupStatus, TranscriptionProgress, WhisperDownloadProgress, COMMAND_TIMEOUT_SECONDS,
-    DEFAULT_WHISPER_MODEL_NAME, DEFAULT_WHISPER_THREADS, DOWNLOAD_TIMEOUT_SECONDS, IMPORT_CONVERSION_PROGRESS_EVENT,
-    IMPORT_TRANSCRIPTION_PROGRESS_EVENT, OLLAMA_TAGS_URL, PREFLIGHT_EVENT, SETUP_OLLAMA_PROGRESS_EVENT,
-    SETUP_WHISPER_PROGRESS_EVENT,
+    CheckStatus, ConversionProgress, OllamaPullProgress, OllamaUrl, PreflightCheck, PreflightCheckDetail,
+    PreflightResult, ProgressEvent, RuntimeBinarySpec, SetupStatus, TranscriptionProgress, WhisperDownloadProgress,
+    COMMAND_TIMEOUT_SECONDS, DOWNLOAD_TIMEOUT_SECONDS, PREFLIGHT_EVENT, WHISPER_DEFAULTS,
 };
 use crate::parsers::{
     calculate_percent, is_valid_sha256, missing_required_ollama_models, normalize_sha256, parse_ffmpeg_duration_ms,
@@ -451,16 +449,17 @@ pub async fn ensure_runtime_binary(app_data_dir: &Path, spec: &RuntimeBinarySpec
 }
 
 pub async fn fetch_ollama_model_names() -> Result<Vec<String>, String> {
+    let tags_url = OllamaUrl::Tags.as_str();
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(3))
         .build()
         .map_err(|error| format!("failed to initialize HTTP client: {error}"))?;
 
     let response = client
-        .get(OLLAMA_TAGS_URL)
+        .get(tags_url)
         .send()
         .await
-        .map_err(|error| format!("failed to reach Ollama at {OLLAMA_TAGS_URL}: {error}"))?;
+        .map_err(|error| format!("failed to reach Ollama at {tags_url}: {error}"))?;
 
     if !response.status().is_success() {
         return Err(format!("Ollama responded with unexpected status {}", response.status()));
@@ -489,7 +488,7 @@ pub fn emit_whisper_progress(
         total_bytes,
         percent,
     };
-    let _ = app.emit(SETUP_WHISPER_PROGRESS_EVENT, payload);
+    let _ = app.emit(ProgressEvent::SetupWhisper.as_str(), payload);
 }
 
 pub fn emit_ollama_progress(
@@ -503,7 +502,7 @@ pub fn emit_ollama_progress(
         total,
         percent: calculate_percent(completed, total),
     };
-    let _ = app.emit(SETUP_OLLAMA_PROGRESS_EVENT, payload);
+    let _ = app.emit(ProgressEvent::SetupOllama.as_str(), payload);
 }
 
 pub async fn download_whisper_model_file(
@@ -621,7 +620,7 @@ fn compute_setup_guidance(
     if !whisper_model_ready {
         guidance.push(format!(
             "Download {} into appdata/models to enable transcription.",
-            whisper_model_file_name(DEFAULT_WHISPER_MODEL_NAME)
+            whisper_model_file_name(WHISPER_DEFAULTS.model_name)
         ));
     }
     if !ollama_server_ready {
@@ -708,7 +707,7 @@ fn emit_conversion_progress(
         total_duration_ms,
         percent,
     };
-    let _ = app.emit(IMPORT_CONVERSION_PROGRESS_EVENT, payload);
+    let _ = app.emit(ProgressEvent::ImportConversion.as_str(), payload);
 }
 
 fn emit_transcription_progress(app: &tauri::AppHandle, status: &str, message: impl Into<String>, percent: f64) {
@@ -717,7 +716,7 @@ fn emit_transcription_progress(app: &tauri::AppHandle, status: &str, message: im
         message: message.into(),
         percent: percent.clamp(0.0, 100.0),
     };
-    let _ = app.emit(IMPORT_TRANSCRIPTION_PROGRESS_EVENT, payload);
+    let _ = app.emit(ProgressEvent::ImportTranscription.as_str(), payload);
 }
 
 async fn probe_ffmpeg_duration_ms(ffmpeg_program: &str, input_path: &Path) -> Result<Option<i64>, String> {
@@ -884,7 +883,7 @@ pub async fn run_whisper_transcription(
         .arg("-l")
         .arg("auto")
         .arg("-t")
-        .arg(DEFAULT_WHISPER_THREADS.to_string())
+        .arg(WHISPER_DEFAULTS.threads.to_string())
         .arg("-pp");
     command.stdout(Stdio::piped());
     command.stderr(Stdio::piped());
