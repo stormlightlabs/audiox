@@ -48,7 +48,8 @@ pub fn run() {
             commands::import_audio_file,
             commands::import_recorded_audio,
             commands::list_documents,
-            commands::get_document
+            commands::get_document,
+            commands::update_document
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -97,6 +98,7 @@ mod tests {
         assert!(table_exists(&connection, "settings"));
         assert!(table_exists(&connection, "documents"));
         assert!(table_exists(&connection, "document_segments"));
+        assert!(table_exists(&connection, "chunks"));
         assert!(table_exists(&connection, "schema_meta"));
 
         fs::remove_dir_all(test_root).expect("test data should be removed");

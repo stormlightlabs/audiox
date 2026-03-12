@@ -4,7 +4,7 @@ use serde::Serialize;
 
 pub const REQUIRED_DIRECTORIES: [&str; 6] = ["models", "audio", "video", "subtitles", "db", "bin"];
 pub const REQUIRED_OLLAMA_MODELS: [&str; 2] = ["nomic-embed-text", "gemma3:4b"];
-pub const SCHEMA_VERSION: i64 = 2;
+pub const SCHEMA_VERSION: i64 = 3;
 pub const PREFLIGHT_EVENT: &str = "preflight://check";
 pub const SETUP_WHISPER_PROGRESS_EVENT: &str = "setup://whisper-progress";
 pub const SETUP_OLLAMA_PROGRESS_EVENT: &str = "setup://ollama-progress";
@@ -12,8 +12,14 @@ pub const IMPORT_CONVERSION_PROGRESS_EVENT: &str = "import://conversion-progress
 pub const IMPORT_TRANSCRIPTION_PROGRESS_EVENT: &str = "import://transcription-progress";
 pub const OLLAMA_TAGS_URL: &str = "http://localhost:11434/api/tags";
 pub const OLLAMA_PULL_URL: &str = "http://localhost:11434/api/pull";
+pub const OLLAMA_GENERATE_URL: &str = "http://localhost:11434/api/generate";
+pub const OLLAMA_EMBED_URL: &str = "http://localhost:11434/api/embed";
+pub const OLLAMA_GENERATE_MODEL: &str = "gemma3:4b";
+pub const OLLAMA_EMBED_MODEL: &str = "nomic-embed-text";
 pub const DEFAULT_WHISPER_MODEL_NAME: &str = "base.en";
 pub const DEFAULT_WHISPER_THREADS: usize = 4;
+// ~512 token chunks (rough approximation: ~0.75 words/token for English prose).
+pub const EMBEDDING_CHUNK_TARGET_WORDS: usize = 384;
 pub const COMMAND_TIMEOUT_SECONDS: u64 = 8;
 pub const DOWNLOAD_TIMEOUT_SECONDS: u64 = 120;
 pub const ALLOWED_IMPORT_EXTENSIONS: [&str; 7] = ["mp3", "m4a", "wav", "flac", "ogg", "opus", "webm"];
@@ -131,6 +137,8 @@ pub struct TranscriptSegment {
 pub struct ImportedDocument {
     pub id: String,
     pub title: String,
+    pub summary: Option<String>,
+    pub tags: Vec<String>,
     pub transcript: String,
     pub audio_path: String,
     pub subtitle_srt_path: String,
@@ -146,6 +154,7 @@ pub struct DocumentSummary {
     pub id: String,
     pub title: String,
     pub summary: Option<String>,
+    pub tags: Vec<String>,
     pub duration_seconds: Option<i64>,
     pub created_at: String,
     pub updated_at: String,
@@ -157,6 +166,7 @@ pub struct DocumentDetail {
     pub id: String,
     pub title: String,
     pub summary: Option<String>,
+    pub tags: Vec<String>,
     pub transcript: String,
     pub audio_path: Option<String>,
     pub subtitle_srt_path: Option<String>,
@@ -165,6 +175,13 @@ pub struct DocumentDetail {
     pub created_at: String,
     pub updated_at: String,
     pub segments: Vec<TranscriptSegment>,
+}
+
+#[derive(Clone, Debug)]
+pub struct EmbeddedChunk {
+    pub chunk_index: i64,
+    pub content: String,
+    pub embedding: Vec<f32>,
 }
 
 impl Default for PreflightResult {

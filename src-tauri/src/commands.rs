@@ -1,5 +1,8 @@
 use super::{bootstrap, models, parsers, storage};
+use chrono::Utc;
 use rusqlite::{params, Connection, OptionalExtension};
+use serde_json::Value;
+use std::time::Duration;
 use tauri::Manager;
 use uuid::Uuid;
 
@@ -28,6 +31,215 @@ fn recording_extension_for_mime(mime_type: Option<&str>) -> &'static str {
         return "m4a";
     }
     "webm"
+}
+
+#[derive(Debug, Default)]
+struct GeneratedMetadata {
+    title: Option<String>,
+    summary: Option<String>,
+    tags: Vec<String>,
+}
+
+fn fallback_summary(transcript: &str) -> Option<String> {
+    let cleaned = transcript.split_whitespace().collect::<Vec<_>>().join(" ");
+    if cleaned.is_empty() {
+        return None;
+    }
+
+    let char_count = cleaned.chars().count();
+    if char_count <= 240 {
+        return Some(cleaned);
+    }
+
+    Some(format!("{}...", cleaned.chars().take(237).collect::<String>()))
+}
+
+fn metadata_prompt(transcript: &str) -> String {
+    let clipped_transcript = transcript.chars().take(16_000).collect::<String>();
+    format!(
+        "You are an assistant that extracts structured metadata from a transcript.\n\
+Return ONLY valid JSON with this exact shape:\n\
+{{\"title\":\"...\",\"summary\":\"...\",\"tags\":[\"tag1\",\"tag2\",\"tag3\"]}}\n\
+Rules:\n\
+- title: concise and descriptive (max 12 words)\n\
+- summary: exactly 2-3 sentences\n\
+- tags: 3-7 short keywords, no hashtags\n\
+\n\
+Transcript:\n\
+{clipped_transcript}"
+    )
+}
+
+fn parse_generated_metadata(response_text: &str) -> GeneratedMetadata {
+    let json_slice = response_text
+        .find('{')
+        .zip(response_text.rfind('}'))
+        .and_then(|(start, end)| (start <= end).then_some(&response_text[start..=end]));
+
+    let Some(payload) = json_slice else {
+        return GeneratedMetadata::default();
+    };
+
+    let Ok(parsed) = serde_json::from_str::<Value>(payload) else {
+        return GeneratedMetadata::default();
+    };
+
+    let title = parsed
+        .get("title")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+        .map(ToString::to_string);
+
+    let summary = parsed
+        .get("summary")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+        .map(ToString::to_string);
+
+    let tags = parsed
+        .get("tags")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flat_map(|items| items.iter())
+        .filter_map(Value::as_str)
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+
+    GeneratedMetadata { title, summary, tags: parsers::sanitize_tags(&tags) }
+}
+
+fn parse_embed_response(payload: &Value) -> Result<Vec<Vec<f32>>, String> {
+    if let Some(embeddings) = payload.get("embeddings").and_then(Value::as_array) {
+        let mut vectors = Vec::with_capacity(embeddings.len());
+        for embedding in embeddings {
+            let values = embedding
+                .as_array()
+                .ok_or_else(|| "ollama embed response contains a non-array embedding".to_string())?;
+            let vector = values
+                .iter()
+                .map(|value| {
+                    value
+                        .as_f64()
+                        .map(|item| item as f32)
+                        .ok_or_else(|| "ollama embed response contains non-numeric values".to_string())
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            if vector.is_empty() {
+                return Err("ollama embed response returned an empty embedding vector".to_string());
+            }
+            vectors.push(vector);
+        }
+        return Ok(vectors);
+    }
+
+    if let Some(single_embedding) = payload.get("embedding").and_then(Value::as_array) {
+        let vector = single_embedding
+            .iter()
+            .map(|value| {
+                value
+                    .as_f64()
+                    .map(|item| item as f32)
+                    .ok_or_else(|| "ollama embed response contains non-numeric values".to_string())
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        if vector.is_empty() {
+            return Err("ollama embed response returned an empty embedding vector".to_string());
+        }
+        return Ok(vec![vector]);
+    }
+
+    Err("ollama embed response did not include embeddings".to_string())
+}
+
+async fn process_document_ai(
+    transcript: &str, segments: &[models::TranscriptSegment], fallback_title: &str,
+) -> Result<(String, Option<String>, Vec<String>, Vec<models::EmbeddedChunk>), String> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(120))
+        .build()
+        .map_err(|error| format!("failed to initialize Ollama HTTP client: {error}"))?;
+
+    let generation_response = client
+        .post(models::OLLAMA_GENERATE_URL)
+        .json(&serde_json::json!({
+            "model": models::OLLAMA_GENERATE_MODEL,
+            "prompt": metadata_prompt(transcript),
+            "stream": false
+        }))
+        .send()
+        .await
+        .map_err(|error| format!("failed to call Ollama generate endpoint: {error}"))?;
+
+    if !generation_response.status().is_success() {
+        let status = generation_response.status();
+        let body = generation_response.text().await.unwrap_or_default();
+        return Err(format!(
+            "ollama metadata generation failed with status {status}: {body}"
+        ));
+    }
+
+    let generation_payload = generation_response
+        .json::<Value>()
+        .await
+        .map_err(|error| format!("failed to parse ollama generate response: {error}"))?;
+    let generated_text = generation_payload
+        .get("response")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "ollama generate response did not include text output".to_string())?;
+    let generated = parse_generated_metadata(generated_text);
+
+    let title = generated
+        .title
+        .filter(|item| !item.trim().is_empty())
+        .unwrap_or_else(|| fallback_title.to_string());
+    let summary = generated.summary.or_else(|| fallback_summary(transcript));
+    let tags = generated.tags;
+
+    let chunks = parsers::build_embedding_chunks(segments, transcript, models::EMBEDDING_CHUNK_TARGET_WORDS);
+    if chunks.is_empty() {
+        return Err("could not create transcript chunks for embeddings".to_string());
+    }
+
+    let embed_response = client
+        .post(models::OLLAMA_EMBED_URL)
+        .json(&serde_json::json!({
+            "model": models::OLLAMA_EMBED_MODEL,
+            "input": &chunks
+        }))
+        .send()
+        .await
+        .map_err(|error| format!("failed to call Ollama embed endpoint: {error}"))?;
+
+    if !embed_response.status().is_success() {
+        let status = embed_response.status();
+        let body = embed_response.text().await.unwrap_or_default();
+        return Err(format!("ollama embedding failed with status {status}: {body}"));
+    }
+
+    let embed_payload = embed_response
+        .json::<Value>()
+        .await
+        .map_err(|error| format!("failed to parse ollama embed response: {error}"))?;
+    let vectors = parse_embed_response(&embed_payload)?;
+
+    if vectors.len() != chunks.len() {
+        return Err(format!(
+            "ollama embed returned {} vectors for {} chunks",
+            vectors.len(),
+            chunks.len()
+        ));
+    }
+
+    let embedded_chunks = chunks
+        .into_iter()
+        .zip(vectors)
+        .enumerate()
+        .map(|(index, (content, embedding))| models::EmbeddedChunk { chunk_index: index as i64, content, embedding })
+        .collect::<Vec<_>>();
+
+    Ok((title, summary, tags, embedded_chunks))
 }
 
 #[tauri::command]
@@ -164,7 +376,7 @@ pub fn list_documents(app: tauri::AppHandle) -> Result<Vec<models::DocumentSumma
         .map_err(|error| format!("failed to open database {}: {error}", database_path.display()))?;
     let mut statement = connection
         .prepare(
-            "SELECT id, title, summary, duration_seconds, created_at, updated_at
+            "SELECT id, title, summary, keywords, duration_seconds, created_at, updated_at
              FROM documents
              ORDER BY datetime(created_at) DESC, created_at DESC",
         )
@@ -176,9 +388,10 @@ pub fn list_documents(app: tauri::AppHandle) -> Result<Vec<models::DocumentSumma
                 id: row.get(0)?,
                 title: row.get(1)?,
                 summary: row.get(2)?,
-                duration_seconds: row.get(3)?,
-                created_at: row.get(4)?,
-                updated_at: row.get(5)?,
+                tags: parsers::parse_keywords_csv(row.get::<_, Option<String>>(3)?.as_deref()),
+                duration_seconds: row.get(4)?,
+                created_at: row.get(5)?,
+                updated_at: row.get(6)?,
             })
         })
         .map_err(|error| format!("failed to query documents: {error}"))?;
@@ -212,7 +425,7 @@ pub fn get_document(app: tauri::AppHandle, id: String) -> Result<models::Documen
 
     let mut document = connection
         .query_row(
-            "SELECT id, title, summary, COALESCE(transcript, ''), audio_path, subtitle_srt_path, subtitle_vtt_path,
+            "SELECT id, title, summary, keywords, COALESCE(transcript, ''), audio_path, subtitle_srt_path, subtitle_vtt_path,
                     duration_seconds, created_at, updated_at
              FROM documents
              WHERE id = ?1",
@@ -222,13 +435,14 @@ pub fn get_document(app: tauri::AppHandle, id: String) -> Result<models::Documen
                     id: row.get(0)?,
                     title: row.get(1)?,
                     summary: row.get(2)?,
-                    transcript: row.get(3)?,
-                    audio_path: row.get(4)?,
-                    subtitle_srt_path: row.get(5)?,
-                    subtitle_vtt_path: row.get(6)?,
-                    duration_seconds: row.get(7)?,
-                    created_at: row.get(8)?,
-                    updated_at: row.get(9)?,
+                    tags: parsers::parse_keywords_csv(row.get::<_, Option<String>>(3)?.as_deref()),
+                    transcript: row.get(4)?,
+                    audio_path: row.get(5)?,
+                    subtitle_srt_path: row.get(6)?,
+                    subtitle_vtt_path: row.get(7)?,
+                    duration_seconds: row.get(8)?,
+                    created_at: row.get(9)?,
+                    updated_at: row.get(10)?,
                     segments: Vec::new(),
                 })
             },
@@ -257,6 +471,66 @@ pub fn get_document(app: tauri::AppHandle, id: String) -> Result<models::Documen
     }
     document.segments = segments;
     Ok(document)
+}
+
+#[tauri::command]
+#[allow(clippy::needless_pass_by_value)]
+pub fn update_document(
+    app: tauri::AppHandle, id: String, title: Option<String>, tags: Option<Vec<String>>,
+) -> Result<models::DocumentDetail, String> {
+    let document_id = id.trim().to_string();
+    if document_id.is_empty() {
+        return Err("id must not be empty".to_string());
+    }
+
+    let app_data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| format!("failed to resolve app data directory: {error}"))?;
+    storage::ensure_directory_layout(&app_data_dir)?;
+
+    let database_path = storage::database_path_from_app_data(&app_data_dir);
+    storage::initialize_database(&database_path)?;
+
+    let connection = Connection::open(&database_path)
+        .map_err(|error| format!("failed to open database {}: {error}", database_path.display()))?;
+
+    let existing = connection
+        .query_row(
+            "SELECT title, keywords FROM documents WHERE id = ?1",
+            params![document_id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+        )
+        .optional()
+        .map_err(|error| format!("failed to query document {}: {error}", document_id))?
+        .ok_or_else(|| format!("document {} was not found", document_id))?;
+
+    let next_title = match title {
+        Some(value) => {
+            let trimmed = value.trim().to_string();
+            if trimmed.is_empty() {
+                return Err("title must not be empty".to_string());
+            }
+            trimmed
+        }
+        None => existing.0,
+    };
+
+    let next_keywords = match tags {
+        Some(values) => parsers::serialize_keywords_csv(&values),
+        None => existing.1,
+    };
+
+    connection
+        .execute(
+            "UPDATE documents
+             SET title = ?2, keywords = ?3, updated_at = ?4
+             WHERE id = ?1",
+            params![document_id, next_title, next_keywords, Utc::now().to_rfc3339()],
+        )
+        .map_err(|error| format!("failed to update document {}: {error}", document_id))?;
+
+    get_document(app, document_id)
 }
 
 #[tauri::command]
@@ -505,13 +779,15 @@ pub async fn import_audio_file(app: tauri::AppHandle, source_path: String) -> Re
 
     let transcript = parsers::build_transcript_text(&segments);
     let duration_seconds = parsers::max_duration_seconds(&segments);
-    let title = source
+    let fallback_title = source
         .file_stem()
         .and_then(|stem| stem.to_str())
         .map(str::trim)
         .filter(|stem| !stem.is_empty())
         .unwrap_or("Imported audio")
         .to_string();
+    let (title, summary, tags, chunks) = process_document_ai(&transcript, &segments, &fallback_title).await?;
+    let keywords_csv = parsers::serialize_keywords_csv(&tags);
 
     let audio_path = storage::path_for_storage(&converted_wav_path, &app_data_dir);
     let subtitle_srt = storage::path_for_storage(&subtitle_srt_path, &app_data_dir);
@@ -524,6 +800,8 @@ pub async fn import_audio_file(app: tauri::AppHandle, source_path: String) -> Re
             document_id: &document_id,
             source_type: "file_import",
             title: &title,
+            summary: summary.as_deref(),
+            keywords_csv: keywords_csv.as_deref(),
             source_uri: &source_uri,
             transcript: &transcript,
             audio_path: &audio_path,
@@ -531,13 +809,16 @@ pub async fn import_audio_file(app: tauri::AppHandle, source_path: String) -> Re
             subtitle_vtt_path: &subtitle_vtt,
             duration_seconds,
             segments: &segments,
+            chunks: &chunks,
         },
     )?;
 
-    let created_at = chrono::Utc::now().to_rfc3339();
+    let created_at = Utc::now().to_rfc3339();
     Ok(models::ImportedDocument {
         id: document_id,
         title,
+        summary,
+        tags,
         transcript,
         audio_path,
         subtitle_srt_path: subtitle_srt,
@@ -610,7 +891,9 @@ pub async fn import_recorded_audio(
 
     let transcript = parsers::build_transcript_text(&segments);
     let duration_seconds = parsers::max_duration_seconds(&segments);
-    let title = format!("Recording {}", chrono::Utc::now().format("%Y-%m-%d %H:%M UTC"));
+    let fallback_title = format!("Recording {}", Utc::now().format("%Y-%m-%d %H:%M UTC"));
+    let (title, summary, tags, chunks) = process_document_ai(&transcript, &segments, &fallback_title).await?;
+    let keywords_csv = parsers::serialize_keywords_csv(&tags);
 
     let audio_path = storage::path_for_storage(&converted_wav_path, &app_data_dir);
     let subtitle_srt = storage::path_for_storage(&subtitle_srt_path, &app_data_dir);
@@ -623,6 +906,8 @@ pub async fn import_recorded_audio(
             document_id: &document_id,
             source_type: "microphone_recording",
             title: &title,
+            summary: summary.as_deref(),
+            keywords_csv: keywords_csv.as_deref(),
             source_uri: &source_uri,
             transcript: &transcript,
             audio_path: &audio_path,
@@ -630,13 +915,16 @@ pub async fn import_recorded_audio(
             subtitle_vtt_path: &subtitle_vtt,
             duration_seconds,
             segments: &segments,
+            chunks: &chunks,
         },
     )?;
 
-    let created_at = chrono::Utc::now().to_rfc3339();
+    let created_at = Utc::now().to_rfc3339();
     Ok(models::ImportedDocument {
         id: document_id,
         title,
+        summary,
+        tags,
         transcript,
         audio_path,
         subtitle_srt_path: subtitle_srt,

@@ -13,6 +13,8 @@ pub struct PersistDocumentInput<'a> {
     pub document_id: &'a str,
     pub source_type: &'a str,
     pub title: &'a str,
+    pub summary: Option<&'a str>,
+    pub keywords_csv: Option<&'a str>,
     pub source_uri: &'a str,
     pub transcript: &'a str,
     pub audio_path: &'a str,
@@ -20,6 +22,7 @@ pub struct PersistDocumentInput<'a> {
     pub subtitle_vtt_path: &'a str,
     pub duration_seconds: i64,
     pub segments: &'a [models::TranscriptSegment],
+    pub chunks: &'a [models::EmbeddedChunk],
 }
 
 pub fn ensure_directory_layout(app_data_dir: &Path) -> Result<Vec<String>, String> {
@@ -117,6 +120,7 @@ fn ensure_documents_table_columns(connection: &Connection) -> Result<(), String>
         ("audio_path", "TEXT"),
         ("subtitle_srt_path", "TEXT"),
         ("subtitle_vtt_path", "TEXT"),
+        ("keywords", "TEXT"),
     ];
 
     for (column_name, definition) in required_columns {
@@ -159,6 +163,7 @@ pub fn initialize_database(database_path: &Path) -> Result<(), String> {
         .execute_batch(
             "
           PRAGMA journal_mode = WAL;
+          PRAGMA foreign_keys = ON;
           CREATE TABLE IF NOT EXISTS schema_meta (
             key TEXT PRIMARY KEY NOT NULL,
             value TEXT NOT NULL
@@ -176,6 +181,7 @@ pub fn initialize_database(database_path: &Path) -> Result<(), String> {
             source_uri TEXT,
             title TEXT NOT NULL DEFAULT '',
             summary TEXT,
+            keywords TEXT,
             transcript TEXT,
             audio_path TEXT,
             subtitle_srt_path TEXT,
@@ -194,6 +200,20 @@ pub fn initialize_database(database_path: &Path) -> Result<(), String> {
             created_at TEXT NOT NULL,
             FOREIGN KEY(document_id) REFERENCES documents(id) ON DELETE CASCADE
           );
+
+          CREATE TABLE IF NOT EXISTS chunks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            document_id TEXT NOT NULL,
+            chunk_index INTEGER NOT NULL,
+            content TEXT NOT NULL,
+            embedding BLOB NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(document_id) REFERENCES documents(id) ON DELETE CASCADE,
+            UNIQUE(document_id, chunk_index)
+          );
+
+          CREATE INDEX IF NOT EXISTS idx_chunks_document ON chunks(document_id);
+          CREATE INDEX IF NOT EXISTS idx_documents_created ON documents(created_at);
         ",
         )
         .map_err(|error| format!("failed to initialize schema: {error}"))?;
@@ -313,15 +333,16 @@ pub fn persist_document(database_path: &Path, input: &PersistDocumentInput<'_>) 
     transaction
         .execute(
             "INSERT INTO documents (
-                id, source_type, source_uri, title, summary, transcript, audio_path, subtitle_srt_path, subtitle_vtt_path,
+                id, source_type, source_uri, title, summary, keywords, transcript, audio_path, subtitle_srt_path, subtitle_vtt_path,
                 duration_seconds, created_at, updated_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             params![
                 input.document_id,
                 input.source_type,
                 input.source_uri,
                 input.title,
-                Option::<String>::None,
+                input.summary,
+                input.keywords_csv,
                 input.transcript,
                 input.audio_path,
                 input.subtitle_srt_path,
@@ -352,6 +373,25 @@ pub fn persist_document(database_path: &Path, input: &PersistDocumentInput<'_>) 
             .map_err(|error| format!("failed to insert document segment for {}: {error}", input.document_id))?;
     }
 
+    let mut chunk_statement = transaction
+        .prepare(
+            "INSERT INTO chunks (document_id, chunk_index, content, embedding, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+        )
+        .map_err(|error| format!("failed to prepare chunk insert statement: {error}"))?;
+    for chunk in input.chunks {
+        chunk_statement
+            .execute(params![
+                input.document_id,
+                chunk.chunk_index,
+                chunk.content,
+                embedding_to_blob(&chunk.embedding),
+                now
+            ])
+            .map_err(|error| format!("failed to insert chunk for {}: {error}", input.document_id))?;
+    }
+
+    drop(chunk_statement);
     drop(statement);
     transaction.commit().map_err(|error| {
         format!(
@@ -360,6 +400,14 @@ pub fn persist_document(database_path: &Path, input: &PersistDocumentInput<'_>) 
         )
     })?;
     Ok(())
+}
+
+fn embedding_to_blob(embedding: &[f32]) -> Vec<u8> {
+    let mut blob = Vec::with_capacity(std::mem::size_of_val(embedding));
+    for value in embedding {
+        blob.extend_from_slice(&value.to_le_bytes());
+    }
+    blob
 }
 
 #[cfg(test)]

@@ -78,7 +78,7 @@ Each milestone produces a usable app. Later milestones build on earlier ones.
 
 **Usable state:** User picks any audio file → sees conversion + transcription progress → reads the transcript with subtitles generated.
 
-## M5: AI-Powered Document Processing
+## ✅ M5: AI-Powered Document Processing
 
 **Goal:** Transcripts are automatically enriched with AI-generated metadata and embeddings.
 

@@ -2,6 +2,7 @@
 
 use regex::Regex;
 use serde_json::Value;
+use std::collections::HashSet;
 use std::path::Path;
 
 use crate::models::{TranscriptSegment, ALLOWED_IMPORT_EXTENSIONS, REQUIRED_OLLAMA_MODELS};
@@ -267,6 +268,114 @@ pub fn max_duration_seconds(segments: &[TranscriptSegment]) -> i64 {
     ((max_end_ms as f64) / 1000.0).ceil() as i64
 }
 
+fn normalized_tag(raw: &str) -> Option<String> {
+    let trimmed = raw
+        .trim()
+        .trim_matches(|character: char| matches!(character, '#' | '"' | '\'' | ',' | '.' | ';' | ':'));
+
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let collapsed = trimmed.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.is_empty() {
+        return None;
+    }
+    Some(collapsed)
+}
+
+pub fn sanitize_tags(tags: &[String]) -> Vec<String> {
+    let mut deduped = Vec::new();
+    let mut seen = HashSet::new();
+
+    for candidate in tags {
+        let Some(tag) = normalized_tag(candidate) else {
+            continue;
+        };
+        let key = tag.to_ascii_lowercase();
+        if seen.insert(key) {
+            deduped.push(tag);
+        }
+    }
+
+    deduped
+}
+
+pub fn parse_keywords_csv(value: Option<&str>) -> Vec<String> {
+    let Some(raw) = value else {
+        return Vec::new();
+    };
+
+    let candidates = raw.split(',').map(str::to_string).collect::<Vec<_>>();
+    sanitize_tags(&candidates)
+}
+
+pub fn serialize_keywords_csv(tags: &[String]) -> Option<String> {
+    let cleaned = sanitize_tags(tags);
+    if cleaned.is_empty() {
+        return None;
+    }
+    Some(cleaned.join(", "))
+}
+
+fn chunk_text_by_words(text: &str, target_words: usize) -> Vec<String> {
+    if target_words == 0 {
+        return Vec::new();
+    }
+
+    let words = text.split_whitespace().collect::<Vec<_>>();
+    if words.is_empty() {
+        return Vec::new();
+    }
+
+    words
+        .chunks(target_words)
+        .map(|chunk| chunk.join(" "))
+        .filter(|chunk| !chunk.trim().is_empty())
+        .collect()
+}
+
+pub fn build_embedding_chunks(segments: &[TranscriptSegment], transcript: &str, target_words: usize) -> Vec<String> {
+    if target_words == 0 {
+        return Vec::new();
+    }
+
+    let mut chunks = Vec::new();
+    let mut current_chunk = Vec::new();
+    let mut current_words = 0_usize;
+
+    for segment in segments {
+        let text = segment.text.trim();
+        if text.is_empty() {
+            continue;
+        }
+
+        let segment_word_count = text.split_whitespace().count().max(1);
+        if !current_chunk.is_empty() && current_words + segment_word_count > target_words {
+            chunks.push(current_chunk.join(" "));
+            current_chunk.clear();
+            current_words = 0;
+        }
+
+        current_chunk.push(text.to_string());
+        current_words += segment_word_count;
+    }
+
+    if !current_chunk.is_empty() {
+        chunks.push(current_chunk.join(" "));
+    }
+
+    if chunks.is_empty() {
+        return chunk_text_by_words(transcript, target_words);
+    }
+
+    chunks
+        .into_iter()
+        .map(|chunk| chunk.trim().to_string())
+        .filter(|chunk| !chunk.is_empty())
+        .collect()
+}
+
 pub fn normalize_sha256(value: &str) -> String {
     value.trim().to_ascii_lowercase()
 }
@@ -295,5 +404,27 @@ mod tests {
         assert!(!is_valid_sha256(
             "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
         ));
+    }
+
+    #[test]
+    fn keyword_csv_round_trip_is_normalized() {
+        let parsed = parse_keywords_csv(Some("  AI, #podcast, ai , \"notes\" "));
+        assert_eq!(parsed, vec!["AI", "podcast", "notes"]);
+        assert_eq!(serialize_keywords_csv(&parsed), Some("AI, podcast, notes".to_string()));
+    }
+
+    #[test]
+    fn embedding_chunks_follow_target_word_budget() {
+        let segments = vec![
+            TranscriptSegment { start_ms: 0, end_ms: 1000, text: "one two three".to_string() },
+            TranscriptSegment { start_ms: 1001, end_ms: 2000, text: "four five".to_string() },
+            TranscriptSegment { start_ms: 2001, end_ms: 3000, text: "six seven eight".to_string() },
+        ];
+
+        let chunks = build_embedding_chunks(&segments, "", 4);
+        assert_eq!(chunks.len(), 3);
+        assert_eq!(chunks[0], "one two three");
+        assert_eq!(chunks[1], "four five");
+        assert_eq!(chunks[2], "six seven eight");
     }
 }

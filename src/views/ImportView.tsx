@@ -23,6 +23,8 @@ type TranscriptionProgress = { status: ProgressStatus; message: string; percent:
 type ImportedDocument = {
   id: string;
   title: string;
+  summary: string | null;
+  tags: string[];
   transcript: string;
   audioPath: string;
   subtitleSrtPath: string;

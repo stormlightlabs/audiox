@@ -8,6 +8,7 @@ type DocumentSummary = {
   id: string;
   title: string;
   summary: string | null;
+  tags: string[];
   durationSeconds: number | null;
   createdAt: string;
   updatedAt: string;
@@ -87,6 +88,17 @@ export function LibraryView() {
                   <div>
                     <p class="text-base font-semibold text-text">{document.title || "Untitled transcript"}</p>
                     <p class="mt-1 text-xs text-subtext">{document.summary || "Raw transcript only."}</p>
+                    <Show when={document.tags.length > 0}>
+                      <div class="mt-2 flex flex-wrap gap-1.5">
+                        <For each={document.tags}>
+                          {(tag) => (
+                            <span class="rounded-full border border-overlay px-2 py-0.5 text-[10px] font-semibold text-subtext">
+                              {tag}
+                            </span>
+                          )}
+                        </For>
+                      </div>
+                    </Show>
                   </div>
                   <p class="text-xs text-subtext">{formatDuration(document.durationSeconds)}</p>
                 </div>
