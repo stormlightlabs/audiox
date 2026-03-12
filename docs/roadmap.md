@@ -6,9 +6,12 @@ Each milestone produces a usable app. Later milestones build on earlier ones.
 
 - Part 1 (MVP): M1 - M4
 - Part 2: M5 - M7
-- Part 3: M8
-- Part 4: M9 - M10
-- Part 5: M11 - M12
+- Part 3: M13
+- Part 4: M8
+- Part 5: M9
+- Part 6: M10
+- Part 7: M11
+- Part 8: M12
 
 ## ✅ M1: Project Scaffold & Shell
 
@@ -212,3 +215,24 @@ Each milestone produces a usable app. Later milestones build on earlier ones.
 - [ ] Empty states for library, search results
 - [ ] Window title updates based on current view
 - [x] App icon and branding
+
+## M13: Local Embedding (Decouple from Ollama)
+
+**Goal:** Run embedding model locally via `fastembed-rs` instead of requiring Ollama for search and document indexing.
+
+- Add `fastembed` Rust crate (ONNX Runtime-based, supports `NomicEmbedTextV15` — 768 dims, same as current Ollama `nomic-embed-text`)
+- New `src-tauri/src/embedding.rs` module: `EmbeddingState` managed in Tauri app state, loaded once and reused
+  - `embed_chunks()` — embed document chunks with `search_document:` prefix
+  - `embed_query()` — embed search queries with `search_query:` prefix
+  - Model auto-downloads to `appdata/models/embed/` on first use (~262 MB ONNX)
+- Replace Ollama `/api/embed` calls in `generate_metadata_and_embeddings()` and `search()` with in-process fastembed calls
+- Update preflight checks:
+  - Remove `nomic-embed-text` from required Ollama models
+  - Add "Embedding model" check for local model files
+  - Downgrade Ollama from hard requirement to soft (`warn` instead of `fail`) — only needed for `gemma3:4b` at document creation time
+- Update setup flow: remove `nomic_embed_text` Ollama pull step, add local embedding model download step
+- Remove dead code: `parse_embed_response()`, Ollama embed error handling
+- No re-embedding migration needed — fastembed `NomicEmbedTextV15` produces identical 768-dim vectors
+- Task-type prefixes (`search_document:` / `search_query:`) are a free quality improvement over unprefixed Ollama calls
+
+**Usable state:** Search and library browsing work without Ollama. Ollama is only needed when creating new documents (Gemma for title/summary/keywords).

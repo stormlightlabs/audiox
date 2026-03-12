@@ -2,7 +2,7 @@
 
 ## Overview
 
-Audio X is a Tauri 2 desktop app (SolidJS + Tailwind v4 frontend, Rust backend) that transcribes audio to text using whisper.cpp and builds a searchable document library from transcripts using Ollama-hosted Gemma models. It supports local audio files, microphone recording, and URL-based media import via yt-dlp.
+Audio X is a Tauri 2 desktop app (SolidJS + Tailwind v4 frontend, Rust backend) that transcribes audio to text using whisper.cpp and builds a searchable document library from transcripts. Embeddings are generated locally via fastembed-rs (ONNX Runtime), while Ollama-hosted Gemma models handle text generation (titles, summaries, keywords). It supports local audio files, microphone recording, and URL-based media import via yt-dlp.
 
 ## Architecture
 
@@ -28,7 +28,10 @@ Audio X is a Tauri 2 desktop app (SolidJS + Tailwind v4 frontend, Rust backend) 
 │  └──────────────────────────────────────────────────┘ │
 │                                                       │
 │  ┌──────────────────────────────────────────────────┐ │
-│  │ Ollama HTTP Client (embed + generate)            │ │
+│  │ fastembed-rs (local ONNX embedding)              │ │
+│  └──────────────────────────────────────────────────┘ │
+│  ┌──────────────────────────────────────────────────┐ │
+│  │ Ollama HTTP Client (generate only)               │ │
 │  └──────────────────────────────────────────────────┘ │
 │  ┌──────────────────────────────────────────────────┐ │
 │  │ SQLite (documents, embeddings, metadata)         │ │
@@ -44,6 +47,8 @@ All runtime data lives under the Tauri `appDataDir` (`~/Library/Application Supp
 appdata/
   models/
     ggml-base.en.bin          # whisper model (downloaded on first run)
+    embed/                    # fastembed model cache (auto-downloaded on first use)
+      nomic-embed-text-v1.5/  # ~262 MB ONNX model files
   audio/
     <uuid>.wav                # recorded/imported audio files
   video/
@@ -66,9 +71,10 @@ On every launch the app shows a splash screen while running preflight checks. Th
 1. **Executable dependencies** — ensure `whisper-cli`, `ffmpeg`, and `yt-dlp` are executable:
    - sidecar → managed runtime cache → PATH
 2. **Whisper model** — check that at least one model file exists in `appdata/models/`
-3. **Ollama server** — `GET http://localhost:11434/api/tags`, timeout 3s
-4. **Ollama models** — parse `/api/tags` response, confirm `nomic-embed-text` and `gemma3:4b` are present
-5. **Database** — open or create `appdata/db/audiox.db`, run migrations if schema version is stale
+3. **Embedding model** — check that fastembed model files exist in `appdata/models/embed/` (warn if missing — auto-downloads on first use)
+4. **Ollama server** — `GET http://localhost:11434/api/tags`, timeout 3s (warn if unavailable — only needed for document creation)
+5. **Ollama models** — parse `/api/tags` response, confirm `gemma3:4b` is present (warn if missing — only needed for document creation)
+6. **Database** — open or create `appdata/db/audiox.db`, run migrations if schema version is stale
 
 ### Status Reporting
 
@@ -103,8 +109,9 @@ type PreflightResult = {
   ffmpeg: CheckStatus; // sidecar-first executable check
   yt_dlp: CheckStatus; // optional executable check (warn if missing)
   whisper_model: CheckStatus; // model file
-  ollama_server: CheckStatus; // server reachable
-  ollama_models: CheckStatus; // required models present
+  embedding_model: CheckStatus; // local fastembed model (warn if missing, auto-downloads)
+  ollama_server: CheckStatus; // server reachable (warn if missing — only for doc creation)
+  ollama_models: CheckStatus; // gemma3:4b present (warn if missing — only for doc creation)
   database: CheckStatus; // db accessible
 };
 type CheckStatus = "pass" | "fail" | "warn";
@@ -379,22 +386,71 @@ ffmpeg -i <input> 2>&1 | grep "Duration"
 
 Compare `out_time` against total duration for percentage. `progress=end` signals completion.
 
-## 5. Ollama Integration
+## 5. Local Embedding (fastembed-rs)
+
+Embeddings are generated locally via the `fastembed` Rust crate (ONNX Runtime-based), removing the Ollama dependency for search and document indexing.
+
+### Why Local Embedding
+
+- **No external server required** — search and library browsing work without Ollama running
+- **Same model, same dimensions** — `NomicEmbedTextV15` produces 768-dim vectors identical to Ollama's `nomic-embed-text`. Existing embeddings remain valid with no migration.
+- **Batteries-included** — fastembed handles model download, caching, tokenization, pooling, and normalization automatically
+- **Production-proven** — used by SurrealDB and Qdrant
+
+### Model
+
+| Model                | Format    | Dimensions | Size    | Download                 |
+| -------------------- | --------- | ---------- | ------- | ------------------------ |
+| `NomicEmbedTextV15`  | ONNX fp16 | 768        | ~262 MB | Auto-downloaded by crate |
+| `NomicEmbedTextV15Q` | ONNX int8 | 768        | smaller | Auto-downloaded by crate |
+
+Model files are cached in `appdata/models/embed/` on first use. CPU inference for the 137M-param model is single-digit milliseconds per embedding — no GPU acceleration required.
+
+### Rust Integration
+
+```rust
+use fastembed::{TextEmbedding, InitOptions, EmbeddingModel};
+
+// Initialize once at app startup, hold in Tauri managed state
+let model = TextEmbedding::try_new(
+    InitOptions::new(EmbeddingModel::NomicEmbedTextV15)
+        .with_cache_dir(appdata.join("models/embed"))
+        .with_show_download_progress(true),
+)?;
+```
+
+### Embedding Pipeline
+
+For each transcript chunk (~384 words / ~512 tokens):
+
+```rust
+// Document indexing — prefix with "search_document:"
+let chunks = vec!["search_document: segment text here"];
+let embeddings: Vec<Vec<f32>> = model.embed(chunks, None)?;
+// embeddings[0].len() == 768
+
+// Search query — prefix with "search_query:"
+let query = vec!["search_query: user's search terms"];
+let query_embedding: Vec<Vec<f32>> = model.embed(query, None)?;
+```
+
+Task-type prefixes (`search_document:` / `search_query:`) improve retrieval quality over unprefixed embeddings.
+
+Store embeddings as binary blobs in SQLite alongside the source text chunk and document reference.
+
+## 6. Ollama Integration
 
 ### Prerequisites
 
-Ollama must be installed and running on `http://localhost:11434`. The app detects Ollama status during preflight (§1) and guides the user if it's missing.
+Ollama must be installed and running on `http://localhost:11434` for **document creation** (title, summary, keyword generation). It is **not required** for search or library browsing.
 
 **Health check:** `GET http://localhost:11434/api/tags` — confirms server is running and returns installed models.
 
 ### Required Models
 
-| Purpose        | Model              | Pull Command                   | Dimensions |
-| -------------- | ------------------ | ------------------------------ | ---------- |
-| Embeddings     | `nomic-embed-text` | `ollama pull nomic-embed-text` | 768        |
-| Text transform | `gemma3:4b`        | `ollama pull gemma3:4b`        | —          |
-
-**Why nomic-embed-text:** Outperforms OpenAI ada-002, fast on Apple Silicon (~9k tokens/sec on M2 Max), 8192 token context, 768 dimensions (compact for local SQLite storage).
+| Purpose        | Model       | Pull Command            |
+| -------------- | ----------- | ----------------------- |
+| Text transform | `gemma3:4b` | `ollama pull gemma3:4b` |
 
 **Why gemma3:4b:** Multimodal, 128K context window, runs well on 8GB+ RAM with QAT quantization. Suitable for summarization, title generation, and keyword extraction.
 
@@ -403,24 +459,9 @@ Ollama must be installed and running on `http://localhost:11434`. The app detect
 On first launch (or when models are missing):
 
 1. Check `GET /api/tags` for installed models
-2. For each missing model, call `POST /api/pull` with streaming progress
+2. If `gemma3:4b` is missing, call `POST /api/pull` with streaming progress
 3. Display download progress in the UI (Ollama handles the actual download)
-4. Mark setup complete when both models respond successfully
-
-### Embedding Pipeline
-
-For each transcript segment (or chunk of ~512 tokens):
-
-```text
-POST http://localhost:11434/api/embed
-{
-  "model": "nomic-embed-text",
-  "input": ["segment text here"]
-}
-→ { "embeddings": [[0.123, -0.456, ...]] }  // 768-dim vector
-```
-
-Store embeddings as binary blobs in SQLite alongside the source text chunk and document reference.
+4. Mark setup complete when the model responds successfully
 
 ### Document Transformation Pipeline
 
@@ -459,7 +500,7 @@ POST http://localhost:11434/api/generate
 }
 ```
 
-## 6. Data Model (SQLite)
+## 7. Data Model (SQLite)
 
 Use `rusqlite` in the Rust backend. Database stored at `appdata/db/audiox.db`.
 
@@ -506,12 +547,12 @@ CREATE TABLE settings (
 
 Search is cosine similarity over chunk embeddings:
 
-1. Embed the query: `POST /api/embed { model: "nomic-embed-text", input: [query] }`
+1. Embed the query locally via fastembed (`search_query:` prefix) — no external server needed
 2. Compute cosine similarity between query embedding and all chunk embeddings in SQLite (Rust-side, in-memory scan)
 3. Return top-K chunks with their parent document references
 4. For small-medium libraries (< 10k chunks), brute-force cosine similarity in Rust is fast enough. No vector DB needed.
 
-## 7. Frontend Architecture
+## 8. Frontend Architecture
 
 ### Tech Stack
 
@@ -550,6 +591,7 @@ type AppState = {
   };
   setup: {
     whisperReady: boolean;
+    embeddingReady: boolean;
     ollamaReady: boolean;
     modelsReady: boolean;
   };
@@ -586,7 +628,7 @@ Exposed Rust commands called from the frontend via `invoke()`:
 | `list_documents`         | `sort, filter`      | `DocumentMeta[]`  | List library documents                        |
 | `get_document`           | `id`                | `Document`        | Full document with transcript                 |
 | `delete_document`        | `id`                | —                 | Remove document and audio                     |
-| `search`                 | `query`             | `SearchResult[]`  | Semantic search over embeddings               |
+| `search`                 | `query`             | `SearchResult[]`  | Semantic search via local fastembed           |
 | `update_document`        | `id, fields`        | `Document`        | Edit title, tags, etc.                        |
 
 ### Sidecar + Runtime Configuration
@@ -625,11 +667,12 @@ Preflight resolution strategy:
 
 ### Rust Dependencies (additional)
 
-| Crate      | Purpose                                      |
-| ---------- | -------------------------------------------- |
-| `rusqlite` | SQLite database                              |
-| `uuid`     | Document IDs                                 |
-| `reqwest`  | HTTP client for Ollama API + model downloads |
-| `tokio`    | Async runtime (Tauri 2 uses tokio)           |
-| `chrono`   | Timestamps                                   |
-| `regex`    | Parse yt-dlp/ffmpeg progress output          |
+| Crate       | Purpose                                                 |
+| ----------- | ------------------------------------------------------- |
+| `rusqlite`  | SQLite database                                         |
+| `uuid`      | Document IDs                                            |
+| `fastembed` | Local embedding model (ONNX Runtime + nomic-embed-text) |
+| `reqwest`   | HTTP client for Ollama API + model downloads            |
+| `tokio`     | Async runtime (Tauri 2 uses tokio)                      |
+| `chrono`    | Timestamps                                              |
+| `regex`     | Parse yt-dlp/ffmpeg progress output                     |
