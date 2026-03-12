@@ -9,6 +9,7 @@
     "build": "vite build",
     "serve": "vite preview",
     "test": "vitest run",
+    "setup:sidecars": "bash setup.sh",
     "tauri": "tauri",
     "lint": "eslint src --fix",
     "format": "dprint fmt .",

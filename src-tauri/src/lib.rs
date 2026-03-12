@@ -5,6 +5,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use std::collections::HashSet;
 use std::ffi::OsStr;
 use std::fs;
 use std::io::Write;
@@ -136,8 +137,10 @@ struct RuntimeBinarySpec {
     executable_stem: &'static str,
     version_args: &'static [&'static str],
     path_candidates: &'static [&'static str],
+    sidecar_candidates: &'static [&'static str],
     download_url_env: &'static str,
     download_sha256_env: &'static str,
+    allow_runtime_download: bool,
 }
 
 const WHISPER_BINARY_SPEC: RuntimeBinarySpec = RuntimeBinarySpec {
@@ -148,8 +151,10 @@ const WHISPER_BINARY_SPEC: RuntimeBinarySpec = RuntimeBinarySpec {
     executable_stem: "whisper-cli",
     version_args: &["--version"],
     path_candidates: &["whisper-cli"],
+    sidecar_candidates: &["binaries/whisper-cli", "whisper-cli"],
     download_url_env: "AUDIOX_WHISPER_URL",
     download_sha256_env: "AUDIOX_WHISPER_SHA256",
+    allow_runtime_download: false,
 };
 
 const FFMPEG_BINARY_SPEC: RuntimeBinarySpec = RuntimeBinarySpec {
@@ -160,8 +165,10 @@ const FFMPEG_BINARY_SPEC: RuntimeBinarySpec = RuntimeBinarySpec {
     executable_stem: "ffmpeg",
     version_args: &["-version"],
     path_candidates: &["ffmpeg"],
+    sidecar_candidates: &["binaries/ffmpeg", "ffmpeg"],
     download_url_env: "AUDIOX_FFMPEG_URL",
     download_sha256_env: "AUDIOX_FFMPEG_SHA256",
+    allow_runtime_download: false,
 };
 
 const YT_DLP_BINARY_SPEC: RuntimeBinarySpec = RuntimeBinarySpec {
@@ -172,8 +179,10 @@ const YT_DLP_BINARY_SPEC: RuntimeBinarySpec = RuntimeBinarySpec {
     executable_stem: "yt-dlp",
     version_args: &["--version"],
     path_candidates: &["yt-dlp", "yt_dlp"],
+    sidecar_candidates: &["binaries/yt-dlp", "yt-dlp"],
     download_url_env: "AUDIOX_YTDLP_URL",
     download_sha256_env: "AUDIOX_YTDLP_SHA256",
+    allow_runtime_download: false,
 };
 
 fn ensure_directory_layout(app_data_dir: &Path) -> Result<Vec<String>, String> {
@@ -407,6 +416,84 @@ fn managed_binary_path(app_data_dir: &Path, spec: &RuntimeBinarySpec) -> PathBuf
         .join(managed_binary_filename(spec))
 }
 
+#[cfg(target_os = "windows")]
+fn normalize_executable_path(path: PathBuf) -> PathBuf {
+    if path.extension().and_then(|item| item.to_str()) == Some("exe") {
+        return path;
+    }
+
+    let mut with_extension = path;
+    with_extension.as_mut_os_string().push(".exe");
+    with_extension
+}
+
+#[cfg(not(target_os = "windows"))]
+fn normalize_executable_path(path: PathBuf) -> PathBuf {
+    if path.extension().and_then(|item| item.to_str()) == Some("exe") {
+        let mut without_extension = path;
+        without_extension.set_extension("");
+        return without_extension;
+    }
+    path
+}
+
+fn read_sidecar_candidates_from_directory(dir: &Path, executable_stem: &str) -> Vec<PathBuf> {
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut matches = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+
+        let Some(file_name) = path.file_name().and_then(|item| item.to_str()) else {
+            continue;
+        };
+
+        if file_name == executable_stem
+            || file_name == format!("{executable_stem}.exe")
+            || file_name.starts_with(&format!("{executable_stem}-"))
+            || file_name.starts_with(&format!("{executable_stem}_"))
+        {
+            matches.push(path);
+        }
+    }
+
+    matches
+}
+
+fn sidecar_candidate_paths(spec: &RuntimeBinarySpec) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+
+    if let Ok(current_exe) = std::env::current_exe() {
+        if let Some(exe_dir) = current_exe.parent() {
+            for candidate in spec.sidecar_candidates {
+                candidates.push(normalize_executable_path(exe_dir.join(candidate)));
+            }
+            candidates.extend(read_sidecar_candidates_from_directory(exe_dir, spec.executable_stem));
+            let sidecar_dir = exe_dir.join("binaries");
+            candidates.extend(read_sidecar_candidates_from_directory(&sidecar_dir, spec.executable_stem));
+        }
+    }
+
+    let manifest_sidecar_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("binaries");
+    for candidate in spec.sidecar_candidates {
+        candidates.push(normalize_executable_path(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(candidate)));
+    }
+    candidates.extend(read_sidecar_candidates_from_directory(
+        &manifest_sidecar_dir,
+        spec.executable_stem,
+    ));
+
+    let mut seen = HashSet::new();
+    candidates.retain(|path| seen.insert(path.to_string_lossy().to_string()));
+    candidates
+}
+
 async fn execute_version_command<S: AsRef<OsStr>>(
     program: S, program_label: &str, args: &[&str],
 ) -> Result<(), String> {
@@ -578,7 +665,49 @@ fn download_guidance(spec: &RuntimeBinarySpec) -> String {
     )
 }
 
+fn non_download_guidance(spec: &RuntimeBinarySpec) -> String {
+    format!(
+        "{} is unavailable. Reinstall Audio X to restore bundled dependencies. For local development, run `bash setup.sh` and ensure '{}' is installed on PATH.",
+        spec.display_name, spec.executable_stem
+    )
+}
+
+async fn try_sidecar_binary(spec: &RuntimeBinarySpec) -> Result<Option<String>, String> {
+    let mut errors = Vec::new();
+    for candidate in sidecar_candidate_paths(spec) {
+        if !candidate.is_file() {
+            continue;
+        }
+
+        let display = candidate.display().to_string();
+        match execute_version_command(&candidate, &display, spec.version_args).await {
+            Ok(()) => {
+                return Ok(Some(format!(
+                    "{} sidecar is available at {}.",
+                    spec.display_name,
+                    candidate.display()
+                )));
+            }
+            Err(error) => errors.push(format!("{display}: {error}")),
+        }
+    }
+
+    if !errors.is_empty() {
+        log::warn!(
+            "found {} sidecar candidates but none were executable: {}",
+            spec.display_name,
+            errors.join(" | ")
+        );
+    }
+
+    Ok(None)
+}
+
 async fn ensure_runtime_binary(app_data_dir: &Path, spec: &RuntimeBinarySpec) -> Result<String, String> {
+    if let Some(sidecar_message) = try_sidecar_binary(spec).await? {
+        return Ok(sidecar_message);
+    }
+
     let binary_path = managed_binary_path(app_data_dir, spec);
 
     if binary_path.is_file() {
@@ -596,6 +725,10 @@ async fn ensure_runtime_binary(app_data_dir: &Path, spec: &RuntimeBinarySpec) ->
             "{} is available on PATH as '{system_binary}'.",
             spec.display_name
         ));
+    }
+
+    if !spec.allow_runtime_download {
+        return Err(non_download_guidance(spec));
     }
 
     let download_url = configured_download_url(spec)?;
@@ -1316,6 +1449,8 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
+    #[cfg(unix)]
+    use std::{os::unix::fs::PermissionsExt, vec};
 
     fn temp_dir_path(label: &str) -> PathBuf {
         let now = SystemTime::now()
@@ -1426,6 +1561,61 @@ mod tests {
         set_setup_completed(&database_path, false).expect("set_setup_completed should write false");
         let value = read_setting(&connection, "setup_completed").expect("setting should be readable");
         assert_eq!(value.as_deref(), Some("false"));
+
+        fs::remove_dir_all(test_root).expect("test data should be removed");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sidecar_probe_failure_does_not_short_circuit_resolution_fallback() {
+        let test_root = temp_dir_path("sidecar-fallback");
+        fs::create_dir_all(&test_root).expect("test root should be created");
+
+        let failing_sidecar = test_root.join("audiox-sidecar-fail");
+        fs::write(&failing_sidecar, "#!/bin/sh\nexit 9\n").expect("failing sidecar should be written");
+        let mut permissions = fs::metadata(&failing_sidecar)
+            .expect("failing sidecar metadata should be readable")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&failing_sidecar, permissions).expect("failing sidecar should be executable");
+
+        let candidate: &'static str = Box::leak(
+            failing_sidecar
+                .to_string_lossy()
+                .to_string()
+                .into_boxed_str(),
+        );
+        let sidecar_candidates: &'static [&'static str] = Box::leak(vec![candidate].into_boxed_slice());
+
+        let spec = RuntimeBinarySpec {
+            check: PreflightCheck::WhisperCli,
+            tool_id: "audiox-sidecar-fail",
+            display_name: "audiox-sidecar-fail",
+            version: "runtime",
+            executable_stem: "audiox-sidecar-fail",
+            version_args: &["--version"],
+            path_candidates: &[],
+            sidecar_candidates,
+            download_url_env: "AUDIOX_SIDE_TEST_URL",
+            download_sha256_env: "AUDIOX_SIDE_TEST_SHA256",
+            allow_runtime_download: false,
+        };
+
+        let runtime = tokio::runtime::Runtime::new().expect("tokio runtime should initialize");
+        let direct_probe = runtime
+            .block_on(try_sidecar_binary(&spec))
+            .expect("sidecar probing should not fail hard");
+        assert!(
+            direct_probe.is_none(),
+            "failing sidecar should fall through to later resolution stages"
+        );
+
+        let fallback_result = runtime.block_on(ensure_runtime_binary(&test_root, &spec));
+        let error_message = fallback_result.expect_err("resolution should continue and fail with missing guidance");
+        assert!(
+            error_message.contains("is unavailable"),
+            "expected fallback guidance error, got: {error_message}"
+        );
 
         fs::remove_dir_all(test_root).expect("test data should be removed");
     }

@@ -20,10 +20,10 @@ Audio X is a Tauri 2 desktop app (SolidJS + Tailwind v4 frontend, Rust backend) 
 │  └─────┬─────┘ └─────┬────┘ └───────────┬──────────┘  │
 │        │             │                  │             │
 │  ┌─────▼─────────────▼──────────────────▼───────────┐ │
-│  │              Runtime Binaries                    │ │
+│  │      Sidecars + Optional Runtime Binaries        │ │
 │  │  ┌──────────┐  ┌────────┐  ┌──────┐              │ │
 │  │  │whisper   │  │ yt-dlp │  │ffmpeg│              │ │
-│  │  │  -cli    │  │        │  │      │              │ │
+│  │  │  -cli    │  │ (opt)  │  │      │              │ │
 │  │  └──────────┘  └────────┘  └──────┘              │ │
 │  └──────────────────────────────────────────────────┘ │
 │                                                       │
@@ -52,9 +52,7 @@ appdata/
     <uuid>.srt                # generated subtitle files
     <uuid>.vtt
   bin/
-    whisper-cli/<version>/    # runtime managed whisper executable
-    ffmpeg/<version>/         # runtime managed ffmpeg executable
-    yt-dlp/<version>/         # runtime managed yt-dlp executable
+    yt-dlp/<version>/         # optional runtime-managed yt-dlp executable
   db/
     audiox.db                 # SQLite database
 ```
@@ -65,7 +63,8 @@ On every launch the app shows a splash screen while running preflight checks. Th
 
 ### Check Sequence
 
-1. **Runtime binaries** — ensure `whisper-cli`, `ffmpeg`, and `yt-dlp` are executable (managed binary path → PATH fallback → runtime download with checksum)
+1. **Executable dependencies** — ensure `whisper-cli`, `ffmpeg`, and `yt-dlp` are executable:
+   - sidecar → managed runtime cache → PATH
 2. **Whisper model** — check that at least one model file exists in `appdata/models/`
 3. **Ollama server** — `GET http://localhost:11434/api/tags`, timeout 3s
 4. **Ollama models** — parse `/api/tags` response, confirm `nomic-embed-text` and `gemma3:4b` are present
@@ -100,9 +99,9 @@ async fn preflight(app: tauri::AppHandle) -> Result<PreflightResult, String> {
 
 ```typescript
 type PreflightResult = {
-  whisper_cli: CheckStatus; // runtime binary
-  ffmpeg: CheckStatus; // runtime binary
-  yt_dlp: CheckStatus; // runtime binary (warn if missing, not fail)
+  whisper_cli: CheckStatus; // sidecar-first executable check
+  ffmpeg: CheckStatus; // sidecar-first executable check
+  yt_dlp: CheckStatus; // optional executable check (warn if missing)
   whisper_model: CheckStatus; // model file
   ollama_server: CheckStatus; // server reachable
   ollama_models: CheckStatus; // required models present
@@ -115,12 +114,11 @@ type CheckStatus = "pass" | "fail" | "warn";
 
 ### Distribution Strategy
 
-Manage `whisper-cli` as a **runtime binary** in `appDataDir/bin/whisper-cli/<version>/`.
+Bundle `whisper-cli` as a **Tauri sidecar** (`bundle.externalBin`) for production builds.
 
-- On preflight, if missing locally, attempt download from configured URL + SHA256
-- Verify checksum before install
-- Mark executable (`chmod +x` on macOS/Linux)
-- Fall back to `whisper-cli` on system `PATH` if runtime binary is unavailable
+- Preflight resolves in order: sidecar → managed runtime cache → `PATH`
+- Runtime download is not required for `whisper-cli` in end-user flows
+- Sidecar strategy keeps onboarding simple (no first-run binary install prompts)
 
 ### Model Management
 
@@ -131,12 +129,12 @@ Manage `whisper-cli` as a **runtime binary** in `appDataDir/bin/whisper-cli/<ver
 
 ### Transcription Pipeline
 
-**Input requirements:** whisper.cpp requires 16-bit PCM WAV, 16kHz, mono. The ffmpeg runtime binary handles all format conversion (see §4).
+**Input requirements:** whisper.cpp requires 16-bit PCM WAV, 16kHz, mono. The bundled ffmpeg sidecar handles format conversion (see §4).
 
 **Rust command flow:**
 
-1. Convert input audio to required format via ffmpeg runtime binary (see §4)
-2. Spawn whisper-cli runtime binary:
+1. Convert input audio to required format via ffmpeg sidecar (see §4)
+2. Spawn whisper-cli sidecar:
 
    ```sh
    whisper-cli -m <model_path> -f <audio_path> -oj -l auto -t 4 -pp
@@ -183,14 +181,14 @@ Flow:
 1. `navigator.mediaDevices.getUserMedia({ audio: true })` → MediaStream
 2. `MediaRecorder` with `audio/webm;codecs=opus` (or wav via AudioWorklet)
 3. On stop, send blob to Rust backend via IPC
-4. Rust passes to ffmpeg runtime binary for conversion to 16kHz mono WAV, saves to `appdata/audio/`
+4. Rust passes to ffmpeg sidecar for conversion to 16kHz mono WAV, saves to `appdata/audio/`
 5. Trigger transcription pipeline
 
 ## 3. yt-dlp Integration
 
 ### Distribution Strategy
 
-Manage `yt-dlp` as a runtime binary in `appDataDir/bin/yt-dlp/<version>/` with checksum verification. If unavailable, fall back to `yt-dlp` on system `PATH`.
+Bundle `yt-dlp` as a sidecar as well, but keep it optional at the feature level (URL import).
 
 | Platform        | Binary                                             | Size   |
 | --------------- | -------------------------------------------------- | ------ |
@@ -198,7 +196,7 @@ Manage `yt-dlp` as a runtime binary in `appDataDir/bin/yt-dlp/<version>/` with c
 | Linux x86_64    | `yt-dlp_linux` → `yt-dlp-x86_64-unknown-linux-gnu` | ~21 MB |
 | Windows x64     | `yt-dlp.exe` → `yt-dlp-x86_64-pc-windows-msvc.exe` | ~21 MB |
 
-yt-dlp requires ffmpeg for audio extraction/conversion. The app points `--ffmpeg-location` to the managed ffmpeg binary when present, otherwise uses system `PATH`.
+yt-dlp requires ffmpeg for audio extraction/conversion. The app points `--ffmpeg-location` to the bundled ffmpeg sidecar when present, otherwise uses system `PATH`.
 
 ### URL Import Flow
 
@@ -258,7 +256,10 @@ yt-dlp supports 1000+ sites (YouTube, Vimeo, SoundCloud, Bandcamp, Twitter/X, Re
 
 ### Distribution Strategy
 
-Manage ffmpeg as a runtime binary in `appDataDir/bin/ffmpeg/<version>/` with checksum verification. If unavailable, fall back to `ffmpeg` on system `PATH`.
+Bundle ffmpeg as a **Tauri sidecar** (`bundle.externalBin`) for production builds.
+
+- Preflight resolves in order: sidecar → managed runtime cache → `PATH`
+- Runtime download is not required for `ffmpeg` in end-user flows
 
 Suggested static build sources by platform:
 
@@ -526,7 +527,7 @@ Exposed Rust commands called from the frontend via `invoke()`:
 | `pull_ollama_model`      | `model_name`        | stream events     | Pull Ollama model with progress               |
 | `save_audio`             | `audio_bytes`       | `audio_path`      | Save recorded audio to appdata                |
 | `convert_audio`          | `input_path`        | `wav_path`        | ffmpeg convert to 16kHz mono WAV              |
-| `transcribe`             | `audio_path, model` | `Transcript`      | Run whisper-cli runtime binary                |
+| `transcribe`             | `audio_path, model` | `Transcript`      | Run whisper-cli sidecar                       |
 | `generate_subtitles`     | `audio_path, model` | `SubtitlePaths`   | Run whisper-cli with -osrt -ovtt              |
 | `burn_subtitles`         | `video, srt`        | `output_path`     | ffmpeg subtitle burn-in                       |
 | `fetch_url_meta`         | `url`               | `YtDlpMeta`       | yt-dlp --dump-json (no download)              |
@@ -538,31 +539,30 @@ Exposed Rust commands called from the frontend via `invoke()`:
 | `search`                 | `query`             | `SearchResult[]`  | Semantic search over embeddings               |
 | `update_document`        | `id, fields`        | `Document`        | Edit title, tags, etc.                        |
 
-### Runtime Binary Configuration
+### Sidecar + Runtime Configuration
 
-Runtime binaries are stored under:
+Bundled sidecars (configured in `tauri.conf.json`):
+
+```text
+bundle.externalBin:
+  binaries/whisper-cli
+  binaries/ffmpeg
+  binaries/yt-dlp
+```
+
+Optional runtime cache:
 
 ```text
 appdata/bin/
-  whisper-cli/<version>/whisper-cli(.exe)
-  ffmpeg/<version>/ffmpeg(.exe)
   yt-dlp/<version>/yt-dlp(.exe)
 ```
 
-Preflight install strategy:
+Preflight resolution strategy:
 
-1. Check managed binary path under `appdata/bin/`
-2. If missing, check system `PATH`
-3. If still missing, attempt download using configured URL + SHA256
-4. Verify SHA256, install atomically, and mark executable
-
-Runtime download env vars (per tool):
-
-```text
-AUDIOX_WHISPER_URL / AUDIOX_WHISPER_SHA256
-AUDIOX_FFMPEG_URL / AUDIOX_FFMPEG_SHA256
-AUDIOX_YTDLP_URL / AUDIOX_YTDLP_SHA256
-```
+1. Check bundled sidecar candidates
+2. Check managed runtime cache (if present)
+3. Check system `PATH`
+4. If still missing, report actionable guidance (reinstall app for users, `setup.sh` for developers)
 
 ### Tauri Plugins Required
 

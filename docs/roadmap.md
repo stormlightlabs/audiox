@@ -30,10 +30,9 @@ Each milestone produces a usable app. Later milestones build on earlier ones.
 **Goal:** Every launch validates runtime dependencies before showing the main UI.
 
 - Splash view as the app entry point (logo, animated checklist via solid-motionone)
-- Add runtime binary manager in Rust (`appdata/bin/<tool>/<version>/`)
+- Add sidecar-first binary resolver in Rust (`whisper-cli`, `ffmpeg`, and `yt-dlp` bundled via Tauri `externalBin`)
 - Preflight checks each binary by running `--version` / `-version`
-- If missing locally, attempt runtime download (URL + SHA256 config), then verify and install
-- If runtime download is not configured, fall back to system PATH check
+- Resolution order: sidecar -> appdata runtime cache -> system PATH
 - Check whisper model file exists in `appdata/models/`
 - Check Ollama server reachable (`GET /api/tags`, 3s timeout)
 - Check required Ollama models present (`nomic-embed-text`, `gemma3:4b`)
@@ -47,16 +46,16 @@ Each milestone produces a usable app. Later milestones build on earlier ones.
 
 ## M3: First-Run Setup & Dependency Management
 
-**Goal:** App downloads all required AI models on first run.
+**Goal:** App is one-click ready on first run (only models are downloaded).
 
 - Detect missing whisper model, download `ggml-base.en.bin` (142 MB) from HuggingFace with progress bar
 - Detect missing Ollama models, pull via `POST /api/pull` with streaming progress
 - If Ollama is not running, show install/start guidance
-- Setup wizard view: step-by-step status for each dependency
+- Setup wizard view: step-by-step status for each dependency with one primary CTA
 - Persist setup completion state in SQLite settings table
 - On completion, re-run preflight → transition to Library
 
-**Usable state:** User launches app → setup wizard downloads everything needed → app is ready for use.
+**Usable state:** User launches app → clicks setup → models download/pull → app is ready for use.
 
 ## M4: Audio Import & Transcription (with ffmpeg)
 
@@ -64,14 +63,14 @@ Each milestone produces a usable app. Later milestones build on earlier ones.
 
 - File picker dialog (via `tauri-plugin-dialog`) for audio file selection (mp3, m4a, wav, flac, ogg, opus, webm)
 - Copy imported file to `appdata/audio/`
-- ffmpeg runtime binary converts any format to 16kHz mono WAV:
+- ffmpeg sidecar (bundled) converts any format to 16kHz mono WAV:
 
   ```sh
   ffmpeg -i <input> -ar 16000 -ac 1 -c:a pcm_s16le -y <output.wav>
   ```
 
 - Parse ffmpeg progress via `-progress pipe:1` for conversion status
-- Spawn `whisper-cli` runtime binary for transcription with progress streaming
+- Spawn `whisper-cli` sidecar (bundled) for transcription with progress streaming
 - Generate subtitles alongside transcript (`-osrt -ovtt` flags)
 - Parse whisper JSON output into timestamped segments
 - Display raw transcript in a Document view with segment timestamps

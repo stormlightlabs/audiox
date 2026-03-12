@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import * as logger from "@tauri-apps/plugin-log";
 import { createContext, onCleanup, onMount, type ParentProps, useContext } from "solid-js";
 import { createStore } from "solid-js/store";
 
@@ -136,8 +137,11 @@ export function AppProvider(props: ParentProps) {
           await unlisten();
           unlisten = undefined;
         }
-      } catch {
-        // Event channel may be unavailable in plain browser contexts.
+      } catch (error) {
+        logger.warn("Event channel may be unavailable in plain browser contexts.");
+        logger.error("error, preflight check failure", {
+          keyValues: { error: error instanceof Error ? error.message : String(error) },
+        });
       }
 
       if (!disposed) {

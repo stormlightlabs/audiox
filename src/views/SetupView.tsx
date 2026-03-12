@@ -1,6 +1,7 @@
 import { useNavigate } from "@solidjs/router";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import * as logger from "@tauri-apps/plugin-log";
 import { createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import { createStore } from "solid-js/store";
 import { type SetupStatus, useAppContext } from "../state/AppContext";
@@ -385,7 +386,10 @@ export function SetupView() {
           setSteps(stepKey, "progress", event.payload.percent);
         });
       } catch {
-        // Events are unavailable in plain browser test contexts.
+        logger.warn("Events are unavailable in plain browser contexts.");
+        logger.error("error, preflight check failure", {
+          keyValues: { error: error instanceof Error ? error.message : String(error) },
+        });
       }
 
       const status = await refreshSetup();
