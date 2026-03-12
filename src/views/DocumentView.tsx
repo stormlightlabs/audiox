@@ -1,13 +1,10 @@
-import { invoke } from "@tauri-apps/api/core";
+import { normalizeError } from "$/errors";
 import { useParams } from "@solidjs/router";
+import { invoke } from "@tauri-apps/api/core";
 import { createEffect, createSignal, For, Show } from "solid-js";
 import { ViewScaffold } from "./ViewScaffold";
 
-type TranscriptSegment = {
-  startMs: number;
-  endMs: number;
-  text: string;
-};
+type TranscriptSegment = { startMs: number; endMs: number; text: string };
 
 type DocumentDetail = {
   id: string;
@@ -22,13 +19,6 @@ type DocumentDetail = {
   updatedAt: string;
   segments: TranscriptSegment[];
 };
-
-function normalizeError(error: unknown): string {
-  if (error instanceof Error) {
-    return error.message;
-  }
-  return String(error);
-}
 
 function formatTimestamp(milliseconds: number): string {
   const totalSeconds = Math.max(0, Math.floor(milliseconds / 1000));
@@ -102,7 +92,9 @@ export function DocumentView() {
 
               <article class="rounded-2xl border border-overlay bg-surface/35 p-4">
                 <p class="mb-3 text-sm font-semibold text-text">Transcript</p>
-                <Show when={currentDocument().segments.length > 0} fallback={<p class="text-sm text-subtext">{currentDocument().transcript}</p>}>
+                <Show
+                  when={currentDocument().segments.length > 0}
+                  fallback={<p class="text-sm text-subtext">{currentDocument().transcript}</p>}>
                   <div class="grid gap-2">
                     <For each={currentDocument().segments}>
                       {(segment) => (

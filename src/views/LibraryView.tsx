@@ -1,3 +1,4 @@
+import { normalizeError } from "$/errors";
 import { A } from "@solidjs/router";
 import { invoke } from "@tauri-apps/api/core";
 import { createSignal, For, onMount, Show } from "solid-js";
@@ -11,13 +12,6 @@ type DocumentSummary = {
   createdAt: string;
   updatedAt: string;
 };
-
-function normalizeError(error: unknown): string {
-  if (error instanceof Error) {
-    return error.message;
-  }
-  return String(error);
-}
 
 function formatDuration(seconds: number | null): string {
   if (!seconds || seconds <= 0) {

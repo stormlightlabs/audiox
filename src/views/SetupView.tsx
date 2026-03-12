@@ -1,3 +1,5 @@
+import { normalizeError } from "$/errors";
+import type { ProgressStatus } from "$/types";
 import { useNavigate } from "@solidjs/router";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
@@ -25,7 +27,7 @@ type SetupStep = {
 
 type WhisperProgressEvent = {
   modelName: string;
-  status: "running" | "completed" | "error";
+  status: ProgressStatus;
   message: string;
   downloadedBytes: number;
   totalBytes: number | null;
@@ -34,7 +36,7 @@ type WhisperProgressEvent = {
 
 type OllamaProgressEvent = {
   modelName: string;
-  status: "running" | "completed" | "error";
+  status: ProgressStatus;
   message: string;
   completed: number;
   total: number;
@@ -42,13 +44,6 @@ type OllamaProgressEvent = {
 };
 
 const STEP_ORDER: StepKey[] = ["whisper_model", "ollama_server", "nomic_embed_text", "gemma"];
-
-function normalizeError(error: unknown): string {
-  if (error instanceof Error) {
-    return error.message;
-  }
-  return String(error);
-}
 
 function hasModel(status: SetupStatus, model: string): boolean {
   return !status.missing_ollama_models.includes(model);
@@ -64,7 +59,7 @@ function modelToStep(modelName: string): StepKey | null {
   return null;
 }
 
-function progressEventStatus(status: "running" | "completed" | "error"): StepStatus {
+function progressEventStatus(status: ProgressStatus): StepStatus {
   if (status === "error") {
     return "fail";
   }

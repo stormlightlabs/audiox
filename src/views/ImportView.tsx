@@ -1,3 +1,5 @@
+import { normalizeError } from "$/errors";
+import type { ProgressStatus } from "$/types";
 import { useNavigate } from "@solidjs/router";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
@@ -9,18 +11,14 @@ const IMPORT_CONVERSION_PROGRESS_EVENT = "import://conversion-progress";
 const IMPORT_TRANSCRIPTION_PROGRESS_EVENT = "import://transcription-progress";
 
 type ConversionProgress = {
-  status: "running" | "completed" | "error";
+  status: ProgressStatus;
   message: string;
   outTimeMs: number;
   totalDurationMs: number | null;
   percent: number;
 };
 
-type TranscriptionProgress = {
-  status: "running" | "completed" | "error";
-  message: string;
-  percent: number;
-};
+type TranscriptionProgress = { status: ProgressStatus; message: string; percent: number };
 
 type ImportedDocument = {
   id: string;
@@ -33,13 +31,6 @@ type ImportedDocument = {
   createdAt: string;
   segments: Array<{ startMs: number; endMs: number; text: string }>;
 };
-
-function normalizeError(error: unknown): string {
-  if (error instanceof Error) {
-    return error.message;
-  }
-  return String(error);
-}
 
 function ProgressBar(props: { percent: number }) {
   return (
@@ -83,12 +74,7 @@ export function ImportView() {
     const picked = await open({
       multiple: false,
       directory: false,
-      filters: [
-        {
-          name: "Audio",
-          extensions: ["mp3", "m4a", "wav", "flac", "ogg", "opus", "webm"],
-        },
-      ],
+      filters: [{ name: "Audio", extensions: ["mp3", "m4a", "wav", "flac", "ogg", "opus", "webm"] }],
     });
     if (typeof picked !== "string" || picked.length === 0) {
       return;
@@ -147,7 +133,9 @@ export function ImportView() {
 
         <Show when={selectedFilePath()}>
           {(path) => (
-            <p class="rounded-xl border border-overlay bg-surface/35 px-3 py-2 text-xs text-subtext">Source: {path()}</p>
+            <p class="rounded-xl border border-overlay bg-surface/35 px-3 py-2 text-xs text-subtext">
+              Source: {path()}
+            </p>
           )}
         </Show>
 

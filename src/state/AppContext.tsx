@@ -1,3 +1,4 @@
+import { normalizeError } from "$/errors";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import * as logger from "@tauri-apps/plugin-log";
@@ -64,13 +65,6 @@ type AppContextValue = {
 };
 
 const AppContext = createContext<AppContextValue>();
-
-function normalizeError(error: unknown): string {
-  if (error instanceof Error) {
-    return error.message;
-  }
-  return String(error);
-}
 
 function createInitialChecklist(): ChecklistState {
   const checklist = {} as ChecklistState;
@@ -167,7 +161,9 @@ export function AppProvider(props: ParentProps) {
     });
   });
 
-  return <AppContext.Provider value={{ state, runPreflight, completeStartupFlow }}>{props.children}</AppContext.Provider>;
+  return (
+    <AppContext.Provider value={{ state, runPreflight, completeStartupFlow }}>{props.children}</AppContext.Provider>
+  );
 }
 
 export function useAppContext() {
