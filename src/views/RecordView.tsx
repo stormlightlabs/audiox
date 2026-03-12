@@ -1,12 +1,20 @@
-import { getPreferredAudioInputDeviceId, setPreferredAudioInputDeviceId, supportsMediaRecording } from "$/devices";
+import { checkMicrophonePermission, requestMicrophonePermission, supportsMediaRecording } from "$/devices";
 import { normalizeError } from "$/errors";
 import { formatElapsed } from "$/format-utils";
 import type { ProgressStatus } from "$/types";
 import { useNavigate } from "@solidjs/router";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { appDataDir, join } from "@tauri-apps/api/path";
 import { createSignal, onCleanup, onMount } from "solid-js";
 import { Motion } from "solid-motionone";
+import {
+  getStatus,
+  pauseRecording as pauseNativeRecording,
+  resumeRecording as resumeNativeRecording,
+  startRecording as startNativeRecording,
+  stopRecording as stopNativeRecording,
+} from "tauri-plugin-audio-recorder-api";
 import { ViewScaffold } from "./ViewScaffold";
 
 const IMPORT_CONVERSION_PROGRESS_EVENT = "import://conversion-progress";
@@ -39,21 +47,6 @@ type ImportedDocument = {
 };
 
 type RecordingPhase = "idle" | "recording" | "paused" | "processing";
-
-function preferredRecordingMimeType(): string {
-  const candidates = ["audio/webm;codecs=opus", "audio/webm", "audio/ogg;codecs=opus", "audio/ogg", "audio/mp4"];
-
-  if (typeof MediaRecorder === "undefined" || typeof MediaRecorder.isTypeSupported !== "function") {
-    return "";
-  }
-
-  for (const mimeType of candidates) {
-    if (MediaRecorder.isTypeSupported(mimeType)) {
-      return mimeType;
-    }
-  }
-  return "";
-}
 
 function ProgressBar(props: { percent: number }) {
   return (
@@ -89,7 +82,7 @@ function RecorderControls(props: RecorderControlsProps) {
           <p class="text-lg font-semibold text-text">{formatElapsed(props.elapsedMs)}</p>
           <p class="text-xs font-semibold tracking-[0.16em] text-subtext uppercase">{props.phase}</p>
         </div>
-        <p class="text-xs text-subtext">Preferred input from Settings is used automatically.</p>
+        <p class="text-xs text-subtext">Native recorder plugin active (16kHz mono WAV).</p>
       </div>
 
       <canvas
@@ -150,6 +143,14 @@ function PipelineProgressCard(props: { title: string; status: ProgressStatus; me
   );
 }
 
+async function buildRecordingOutputPath(): Promise<string> {
+  const root = await appDataDir();
+  const recordingId = typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+    ? crypto.randomUUID()
+    : `${Date.now()}-${Math.round(Math.random() * 100_000)}`;
+  return join(root, "audio", `${recordingId}-recording`);
+}
+
 export function RecordView() {
   const navigate = useNavigate();
   const [isSupported] = createSignal(supportsMediaRecording());
@@ -165,70 +166,21 @@ export function RecordView() {
   let unlistenConversion: UnlistenFn | undefined;
   let unlistenTranscription: UnlistenFn | undefined;
   let unlistenMetadata: UnlistenFn | undefined;
-  let mediaRecorder: MediaRecorder | null = null;
-  let mediaStream: MediaStream | null = null;
-  let recordedChunks: BlobPart[] = [];
-  let activeMimeType = "";
-  let elapsedInterval: number | undefined;
-  let elapsedBaseMs = 0;
-  let segmentStartedAt = 0;
-  let audioContext: AudioContext | null = null;
-  let analyser: AnalyserNode | null = null;
-  let sourceNode: MediaStreamAudioSourceNode | null = null;
   let waveformFrame: number | undefined;
-  let isCleaningUp = false;
+  let statusInterval: number | undefined;
 
-  const stopElapsedTimer = () => {
-    if (elapsedInterval !== undefined) {
-      globalThis.clearInterval(elapsedInterval);
-      elapsedInterval = undefined;
+  const stopStatusPolling = () => {
+    if (statusInterval !== undefined) {
+      globalThis.clearInterval(statusInterval);
+      statusInterval = undefined;
     }
   };
 
-  const currentElapsedMilliseconds = () => {
-    if (phase() === "recording") {
-      return elapsedBaseMs + (performance.now() - segmentStartedAt);
-    }
-    return elapsedBaseMs;
-  };
-
-  const startElapsedTimer = () => {
-    stopElapsedTimer();
-    elapsedInterval = globalThis.setInterval(() => {
-      setElapsedMs(currentElapsedMilliseconds());
-    }, 50);
-  };
-
-  const stopWaveform = () => {
-    if (waveformFrame !== undefined) {
-      globalThis.cancelAnimationFrame(waveformFrame);
-      waveformFrame = undefined;
-    }
-    if (sourceNode) {
-      sourceNode.disconnect();
-      sourceNode = null;
-    }
-    if (analyser) {
-      analyser.disconnect();
-      analyser = null;
-    }
-    if (audioContext) {
-      void audioContext.close();
-      audioContext = null;
-    }
-    if (waveformCanvas) {
-      const context = waveformCanvas.getContext("2d");
-      if (context) {
-        context.fillStyle = "rgba(20, 28, 46, 0.9)";
-        context.fillRect(0, 0, waveformCanvas.width || 320, waveformCanvas.height || 80);
-      }
-    }
-  };
-
-  const drawWaveform = () => {
-    if (!waveformCanvas || !analyser) {
+  const drawIdleWaveform = () => {
+    if (!waveformCanvas) {
       return;
     }
+
     const context = waveformCanvas.getContext("2d");
     if (!context) {
       return;
@@ -243,19 +195,69 @@ export function RecordView() {
       waveformCanvas.height = height;
     }
 
-    const samples = new Uint8Array(analyser.fftSize);
-    analyser.getByteTimeDomainData(samples);
+    context.fillStyle = "rgba(10, 16, 30, 0.9)";
+    context.fillRect(0, 0, width, height);
+    context.lineWidth = Math.max(1, pixelRatio * 1.2);
+    context.strokeStyle = "rgba(70, 148, 255, 0.38)";
+    context.beginPath();
+    context.moveTo(0, height / 2);
+    context.lineTo(width, height / 2);
+    context.stroke();
+  };
+
+  const stopWaveformLoop = () => {
+    if (waveformFrame !== undefined) {
+      globalThis.cancelAnimationFrame(waveformFrame);
+      waveformFrame = undefined;
+    }
+    drawIdleWaveform();
+  };
+
+  const drawWaveformFrame = (time: number) => {
+    if (!waveformCanvas) {
+      waveformFrame = undefined;
+      return;
+    }
+
+    const context = waveformCanvas.getContext("2d");
+    if (!context) {
+      waveformFrame = undefined;
+      return;
+    }
+
+    const { width: cssWidth, height: cssHeight } = waveformCanvas.getBoundingClientRect();
+    const pixelRatio = Math.max(1, globalThis.devicePixelRatio || 1);
+    const width = Math.max(1, Math.floor(cssWidth * pixelRatio));
+    const height = Math.max(1, Math.floor(cssHeight * pixelRatio));
+    if (waveformCanvas.width !== width || waveformCanvas.height !== height) {
+      waveformCanvas.width = width;
+      waveformCanvas.height = height;
+    }
+
+    const recordingPhase = phase();
+    const isActive = recordingPhase === "recording" || recordingPhase === "paused";
+    const baseAmplitude = recordingPhase === "recording" ? 0.26 : 0.06;
+    const amplitude = height * baseAmplitude;
 
     context.fillStyle = "rgba(10, 16, 30, 0.9)";
     context.fillRect(0, 0, width, height);
 
     context.lineWidth = Math.max(1, pixelRatio * 1.2);
-    context.strokeStyle = "rgba(70, 148, 255, 0.95)";
+    context.strokeStyle = recordingPhase === "recording" ? "rgba(70, 148, 255, 0.96)" : "rgba(70, 148, 255, 0.55)";
     context.beginPath();
-    for (const [index, sample] of samples.entries()) {
-      const x = (index / (samples.length - 1)) * width;
-      const normalized = sample / 128;
-      const y = (normalized * height) / 2;
+
+    const centerY = height / 2;
+    const points = 120;
+    for (let index = 0; index < points; index += 1) {
+      const progress = index / Math.max(1, points - 1);
+      const x = progress * width;
+      const envelope = Math.sin(progress * Math.PI);
+      const waveA = Math.sin((progress * 24) + (time * 0.006));
+      const waveB = Math.sin((progress * 41) - (time * 0.0042));
+      const waveC = Math.sin((progress * 73) + (time * 0.0028));
+      const signal = isActive ? (waveA * 0.52) + (waveB * 0.33) + (waveC * 0.15) : 0;
+      const y = centerY + (signal * amplitude * envelope);
+
       if (index === 0) {
         context.moveTo(x, y);
       } else {
@@ -264,186 +266,155 @@ export function RecordView() {
     }
     context.stroke();
 
-    waveformFrame = globalThis.requestAnimationFrame(drawWaveform);
-  };
-
-  const startWaveform = (stream: MediaStream) => {
-    stopWaveform();
-    audioContext = new AudioContext();
-    analyser = audioContext.createAnalyser();
-    analyser.fftSize = 2048;
-    sourceNode = audioContext.createMediaStreamSource(stream);
-    sourceNode.connect(analyser);
-    drawWaveform();
-  };
-
-  const stopMediaStream = () => {
-    if (!mediaStream) {
-      return;
-    }
-    for (const track of mediaStream.getTracks()) {
-      track.stop();
-    }
-    mediaStream = null;
-  };
-
-  const resetRecorderState = () => {
-    stopElapsedTimer();
-    stopWaveform();
-    stopMediaStream();
-    mediaRecorder = null;
-    recordedChunks = [];
-    activeMimeType = "";
-    elapsedBaseMs = 0;
-    segmentStartedAt = 0;
-    setElapsedMs(0);
-  };
-
-  const handleRecordingCompleted = async () => {
-    const blobType = activeMimeType || "audio/webm";
-    const recordingBlob = new Blob(recordedChunks, { type: blobType });
-    recordedChunks = [];
-    if (recordingBlob.size === 0) {
-      setPhase("idle");
-      setError("Recording was empty. Capture at least a short sample and try again.");
+    if (isActive) {
+      waveformFrame = globalThis.requestAnimationFrame(drawWaveformFrame);
       return;
     }
 
-    setPhase("processing");
+    waveformFrame = undefined;
+    drawIdleWaveform();
+  };
+
+  const startWaveformLoop = () => {
+    if (waveformFrame !== undefined) {
+      return;
+    }
+    waveformFrame = globalThis.requestAnimationFrame(drawWaveformFrame);
+  };
+
+  const pollRecorderStatus = async () => {
+    try {
+      const status = await getStatus();
+      setElapsedMs(status.durationMs);
+    } catch {
+      // Ignore transient status polling failures.
+    }
+  };
+
+  const startStatusPolling = () => {
+    stopStatusPolling();
+    void pollRecorderStatus();
+    statusInterval = globalThis.setInterval(() => {
+      void pollRecorderStatus();
+    }, 120);
+  };
+
+  const ensurePermission = async () => {
+    const currentPermission = await checkMicrophonePermission();
+    if (currentPermission.granted) {
+      return true;
+    }
+
+    if (!currentPermission.canRequest) {
+      setError("Microphone permission is denied at the system level.");
+      return false;
+    }
+
+    const requested = await requestMicrophonePermission();
+    if (requested.granted) {
+      return true;
+    }
+
+    setError(requested.canRequest ? "Microphone permission was not granted." : "Microphone access is blocked.");
+    return false;
+  };
+
+  const resetProgressCards = () => {
     setConversionProgress(null);
     setTranscriptionProgress(null);
     setMetadataProgress(null);
-    try {
-      const payload = new Uint8Array(await recordingBlob.arrayBuffer());
-      const imported = await invoke<ImportedDocument>("import_recorded_audio", {
-        audioBytes: [...payload],
-        mimeType: recordingBlob.type || blobType,
-      });
-      setLastDocument(imported);
-      setPhase("idle");
-      await navigate(`/document/${imported.id}`);
-    } catch (processingError) {
-      setPhase("idle");
-      setError(normalizeError(processingError));
-    }
-  };
-
-  const stopRecording = () => {
-    if (!mediaRecorder || mediaRecorder.state === "inactive") {
-      return;
-    }
-    if (phase() === "recording") {
-      elapsedBaseMs += performance.now() - segmentStartedAt;
-      setElapsedMs(elapsedBaseMs);
-    }
-    stopElapsedTimer();
-    stopWaveform();
-    mediaRecorder.stop();
-    stopMediaStream();
-  };
-
-  const pauseRecording = () => {
-    if (!mediaRecorder || mediaRecorder.state !== "recording") {
-      return;
-    }
-    elapsedBaseMs += performance.now() - segmentStartedAt;
-    setElapsedMs(elapsedBaseMs);
-    mediaRecorder.pause();
-    stopElapsedTimer();
-    stopWaveform();
-    setPhase("paused");
-  };
-
-  const resumeRecording = () => {
-    if (!mediaRecorder || mediaRecorder.state !== "paused") {
-      return;
-    }
-    segmentStartedAt = performance.now();
-    mediaRecorder.resume();
-    startElapsedTimer();
-    if (mediaStream) {
-      startWaveform(mediaStream);
-    }
-    setPhase("recording");
   };
 
   const startRecording = async () => {
     if (!isSupported()) {
-      setError("This environment does not support microphone recording.");
-      return;
-    }
-    if (!navigator.mediaDevices?.getUserMedia) {
-      setError("Media device APIs are unavailable in this environment.");
+      setError("This environment does not support native microphone recording.");
       return;
     }
 
     setError(null);
     setLastDocument(null);
-    setConversionProgress(null);
-    setTranscriptionProgress(null);
-    setMetadataProgress(null);
+    resetProgressCards();
 
-    const preferredDeviceId = getPreferredAudioInputDeviceId();
-    const preferredConstraints = preferredDeviceId ? { deviceId: { exact: preferredDeviceId } } : true;
     try {
-      mediaStream = await navigator.mediaDevices.getUserMedia({ audio: preferredConstraints });
-    } catch (streamError) {
-      const canRetryWithDefault = preferredDeviceId
-        && streamError instanceof DOMException
-        && ["NotFoundError", "OverconstrainedError", "NotReadableError"].includes(streamError.name);
-      if (!canRetryWithDefault) {
-        setError(normalizeError(streamError));
+      const allowed = await ensurePermission();
+      if (!allowed) {
         return;
       }
 
-      try {
-        setPreferredAudioInputDeviceId(null);
-        mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      } catch (fallbackError) {
-        setError(normalizeError(fallbackError));
-        return;
-      }
+      const outputPath = await buildRecordingOutputPath();
+      await startNativeRecording({ outputPath, quality: "low", format: "wav", maxDuration: 0 });
+
+      setElapsedMs(0);
+      setPhase("recording");
+      startStatusPolling();
+      startWaveformLoop();
+    } catch (startError) {
+      stopStatusPolling();
+      stopWaveformLoop();
+      setPhase("idle");
+      setError(normalizeError(startError));
     }
+  };
 
-    const mimeType = preferredRecordingMimeType();
-    const options = mimeType ? { mimeType } : undefined;
-
-    try {
-      mediaRecorder = new MediaRecorder(mediaStream, options);
-    } catch (recorderError) {
-      stopMediaStream();
-      setError(normalizeError(recorderError));
+  const pauseRecording = async () => {
+    if (phase() !== "recording") {
       return;
     }
 
-    activeMimeType = mimeType;
-    recordedChunks = [];
-    elapsedBaseMs = 0;
-    segmentStartedAt = performance.now();
-    setElapsedMs(0);
-    setPhase("recording");
-    startElapsedTimer();
-    startWaveform(mediaStream);
+    try {
+      await pauseNativeRecording();
+      setPhase("paused");
+      startWaveformLoop();
+      await pollRecorderStatus();
+    } catch (pauseError) {
+      setError(normalizeError(pauseError));
+    }
+  };
 
-    mediaRecorder.ondataavailable = (event) => {
-      if (event.data.size > 0) {
-        recordedChunks.push(event.data);
-      }
-    };
-    mediaRecorder.onstop = () => {
-      if (isCleaningUp) {
-        return;
-      }
-      void handleRecordingCompleted();
-    };
-    mediaRecorder.addEventListener("error", () => {
-      setError("MediaRecorder encountered an error.");
+  const resumeRecording = async () => {
+    if (phase() !== "paused") {
+      return;
+    }
+
+    try {
+      await resumeNativeRecording();
+      setPhase("recording");
+      startWaveformLoop();
+      await pollRecorderStatus();
+    } catch (resumeError) {
+      setError(normalizeError(resumeError));
+    }
+  };
+
+  const stopRecording = async () => {
+    if (phase() !== "recording" && phase() !== "paused") {
+      return;
+    }
+
+    setError(null);
+    setPhase("processing");
+    stopStatusPolling();
+    stopWaveformLoop();
+
+    try {
+      const recordingResult = await stopNativeRecording();
+      setElapsedMs(recordingResult.durationMs);
+
+      const imported = await invoke<ImportedDocument>("import_recorded_audio", {
+        sourcePath: recordingResult.filePath,
+      });
+      setLastDocument(imported);
       setPhase("idle");
-    });
-    mediaRecorder.start(250);
+      await navigate(`/document/${imported.id}`);
+    } catch (stopError) {
+      setPhase("idle");
+      setError(normalizeError(stopError));
+    }
   };
 
   onMount(() => {
+    drawIdleWaveform();
+
     void (async () => {
       try {
         unlistenConversion = await listen<ConversionProgress>(IMPORT_CONVERSION_PROGRESS_EVENT, (event) => {
@@ -462,7 +433,6 @@ export function RecordView() {
   });
 
   onCleanup(() => {
-    isCleaningUp = true;
     if (unlistenConversion) {
       void unlistenConversion();
     }
@@ -473,11 +443,19 @@ export function RecordView() {
       void unlistenMetadata();
     }
 
-    if (mediaRecorder && mediaRecorder.state !== "inactive") {
-      mediaRecorder.onstop = null;
-      mediaRecorder.stop();
-    }
-    resetRecorderState();
+    stopStatusPolling();
+    stopWaveformLoop();
+
+    void (async () => {
+      try {
+        const status = await getStatus();
+        if (status.state !== "idle") {
+          await stopNativeRecording();
+        }
+      } catch {
+        // Ignore cleanup errors.
+      }
+    })();
   });
 
   if (!isSupported()) {
@@ -488,7 +466,7 @@ export function RecordView() {
         description="Capture speech directly from your microphone, monitor a live waveform, then process the recording through ffmpeg + whisper into a library document.">
         <section class="space-y-4 rounded-3xl border border-overlay bg-elevation/85 p-6">
           <p role="alert" class="rounded-xl border border-accent/50 bg-accent/10 p-3 text-sm text-text">
-            This environment does not support WebView microphone recording.
+            This view requires the native Tauri runtime.
           </p>
         </section>
       </ViewScaffold>
@@ -513,9 +491,15 @@ export function RecordView() {
           onStart={() => {
             void startRecording();
           }}
-          onPause={pauseRecording}
-          onResume={resumeRecording}
-          onStop={stopRecording}
+          onPause={() => {
+            void pauseRecording();
+          }}
+          onResume={() => {
+            void resumeRecording();
+          }}
+          onStop={() => {
+            void stopRecording();
+          }}
           setCanvasRef={(element) => {
             waveformCanvas = element;
           }} />

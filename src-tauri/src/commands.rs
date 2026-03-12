@@ -9,33 +9,6 @@ use std::time::Duration;
 use tauri::Emitter;
 use uuid::Uuid;
 
-fn recording_extension_for_mime(mime_type: Option<&str>) -> &'static str {
-    let Some(raw_mime_type) = mime_type else {
-        return "webm";
-    };
-
-    let normalized = raw_mime_type.trim().to_ascii_lowercase();
-    if normalized.starts_with("audio/webm") {
-        return "webm";
-    }
-    if normalized.starts_with("audio/ogg") {
-        return "ogg";
-    }
-    if normalized.starts_with("audio/wav")
-        || normalized.starts_with("audio/x-wav")
-        || normalized.starts_with("audio/wave")
-    {
-        return "wav";
-    }
-    if normalized.starts_with("audio/mp4")
-        || normalized.starts_with("audio/x-m4a")
-        || normalized.starts_with("audio/mpeg")
-    {
-        return "m4a";
-    }
-    "webm"
-}
-
 #[derive(Debug, Default)]
 struct GeneratedMetadata {
     title: Option<String>,
@@ -1405,11 +1378,14 @@ pub async fn import_audio_file(app: tauri::AppHandle, source_path: String) -> Re
 #[tauri::command]
 #[allow(clippy::needless_pass_by_value)]
 pub async fn import_recorded_audio(
-    app: tauri::AppHandle, audio_bytes: Vec<u8>, mime_type: Option<String>,
+    app: tauri::AppHandle, source_path: String,
 ) -> Result<models::ImportedDocument, String> {
-    if audio_bytes.is_empty() {
-        return Err("audio_bytes must not be empty".to_string());
+    let source_trimmed = source_path.trim();
+    if source_trimmed.is_empty() {
+        return Err("source_path must not be empty".to_string());
     }
+    let source = std::path::PathBuf::from(source_trimmed);
+    parsers::ensure_supported_import_path(&source)?;
 
     let (app_data_dir, database_path) = managed_paths(&app);
     storage::ensure_directory_layout(&app_data_dir)?;
@@ -1421,18 +1397,11 @@ pub async fn import_recorded_audio(
     let model_path = storage::resolve_whisper_model_path(&app_data_dir)?;
 
     let document_id = Uuid::new_v4().to_string();
-    let recording_extension = recording_extension_for_mime(mime_type.as_deref());
-    let recorded_source_path = app_data_dir
-        .join("audio")
-        .join(format!("{document_id}-recording.{recording_extension}"));
-    std::fs::write(&recorded_source_path, &audio_bytes)
-        .map_err(|error| format!("failed to persist recorded audio payload: {error}"))?;
-
+    let recording_extension = parsers::extension_for_path(&source).unwrap_or_else(|| "wav".to_string());
     let converted_wav_path = app_data_dir.join("audio").join(format!("{document_id}.wav"));
-    bootstrap::run_ffmpeg_conversion(&app, &ffmpeg_program, &recorded_source_path, &converted_wav_path).await?;
-
-    if recorded_source_path.is_file() {
-        let _ = std::fs::remove_file(&recorded_source_path);
+    bootstrap::run_ffmpeg_conversion(&app, &ffmpeg_program, &source, &converted_wav_path).await?;
+    if source != converted_wav_path {
+        let _ = remove_file_if_owned(&source, &app_data_dir);
     }
 
     let subtitle_base = app_data_dir.join("subtitles").join(&document_id);
@@ -1467,7 +1436,7 @@ pub async fn import_recorded_audio(
     let audio_path = storage::path_for_storage(&converted_wav_path, &app_data_dir);
     let subtitle_srt = storage::path_for_storage(&subtitle_srt_path, &app_data_dir);
     let subtitle_vtt = storage::path_for_storage(&subtitle_vtt_path, &app_data_dir);
-    let source_uri = format!("microphone://{}", mime_type.unwrap_or_else(|| "audio/webm".to_string()));
+    let source_uri = format!("microphone://{recording_extension}");
 
     storage::persist_document(
         &database_path,

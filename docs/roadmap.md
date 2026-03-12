@@ -149,12 +149,19 @@ Each milestone produces a usable app. Later milestones build on earlier ones.
 
 **Goal:** Record audio directly from the microphone within the app.
 
-- WebView `getUserMedia` for mic access (permission prompt handling)
-- MediaRecorder to capture audio stream
+- Use `tauri-plugin-audio-recorder` (cpal-based Rust native recording) instead of WebView `getUserMedia`
+  - WebView `getUserMedia` is broken on Linux (WebKitGTK ships without WebRTC/MediaStream), and has format inconsistencies across platforms (AAC on macOS WebKit vs WebM/Opus on Windows WebView2)
+  - Native Rust plugin bypasses all webview limitations and works reliably on macOS, Windows, and Linux
+- Add `tauri-plugin-audio-recorder` crate + JS API (`tauri-plugin-audio-recorder-api`)
+- Add `"audio-recorder:default"` permission to Tauri capabilities
+- Add `NSMicrophoneUsageDescription` to `src-tauri/Info.plist` for macOS production builds
+- Use plugin's `checkPermission()` / `requestPermission()` for cross-platform permission handling
+- Record in WAV format (Low preset: 16kHz mono — matches whisper-cli input requirements directly)
+- Plugin API: `startRecording()`, `stopRecording()`, `pauseRecording()`, `resumeRecording()`, `getStatus()`, `getDevices()`
 - Live recording UI: waveform visualization, elapsed time, pause/resume, stop
 - Recording pulse animation with solid-motionone
-- On stop: send audio blob to Rust backend → ffmpeg converts to WAV → trigger transcription pipeline (M4 + M5)
-- Audio device selection in Settings (if multiple inputs available)
+- On stop: saved WAV file → ffmpeg converts if needed → trigger transcription pipeline (M4 + M5)
+- Audio device selection via `getDevices()` in Settings (if multiple inputs available)
 
 **Usable state:** User clicks record → speaks → stops → gets a fully processed document in their library.
 
@@ -195,7 +202,7 @@ Each milestone produces a usable app. Later milestones build on earlier ones.
 
 **Goal:** Production-quality UX.
 
-- [ ]  Page transitions with solid-motionone (view enter/exit animations)
+- [ ] Page transitions with solid-motionone (view enter/exit animations)
 - [ ] Loading/processing states with skeleton screens
 - [ ] Error handling with user-friendly messages and retry actions
 - [ ] Drag-and-drop audio/video file import (in addition to file picker)
@@ -204,4 +211,4 @@ Each milestone produces a usable app. Later milestones build on earlier ones.
 - [ ] Export document as Markdown file
 - [ ] Empty states for library, search results
 - [ ] Window title updates based on current view
-- [ ] App icon and branding
+- [x] App icon and branding

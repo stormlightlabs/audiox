@@ -1,15 +1,18 @@
 import {
+  checkMicrophonePermission,
   getPreferredAudioInputDeviceId,
   listAudioInputDevices,
+  requestMicrophonePermission,
   setPreferredAudioInputDeviceId,
   supportsMediaRecording,
+  type AudioInputDevice,
 } from "$/devices";
 import { normalizeError } from "$/errors";
 import { createSignal, For, onMount } from "solid-js";
 import { ViewScaffold } from "./ViewScaffold";
 
 type DeviceSelectorProps = {
-  devices: MediaDeviceInfo[];
+  devices: AudioInputDevice[];
   selectedDeviceId: string;
   onDeviceChange: (deviceId: string) => void;
 };
@@ -27,11 +30,7 @@ function DeviceSelector(props: DeviceSelectorProps) {
         }}>
         <option value="">System default input</option>
         <For each={props.devices}>
-          {(device, index) => (
-            <option value={device.deviceId}>
-              {device.label || `Microphone ${index() + 1} (allow access to reveal label)`}
-            </option>
-          )}
+          {(device) => <option value={device.id}>{device.name || "Unnamed input"}</option>}
         </For>
       </select>
     </label>
@@ -41,8 +40,9 @@ function DeviceSelector(props: DeviceSelectorProps) {
 export function SettingsView() {
   const [isSupported] = createSignal(supportsMediaRecording());
   const [isLoading, setIsLoading] = createSignal(false);
-  const [devices, setDevices] = createSignal<MediaDeviceInfo[]>([]);
+  const [devices, setDevices] = createSignal<AudioInputDevice[]>([]);
   const [selectedDeviceId, setSelectedDeviceId] = createSignal<string>(getPreferredAudioInputDeviceId() ?? "");
+  const [hasPermission, setHasPermission] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
   const [info, setInfo] = createSignal<string | null>(null);
 
@@ -54,9 +54,16 @@ export function SettingsView() {
     setIsLoading(true);
     setError(null);
     try {
+      const permission = await checkMicrophonePermission();
+      setHasPermission(permission.granted);
+      if (!permission.granted) {
+        setDevices([]);
+        return;
+      }
+
       const inputs = await listAudioInputDevices();
       setDevices(inputs);
-      if (selectedDeviceId().length > 0 && !inputs.some((device) => device.deviceId === selectedDeviceId())) {
+      if (selectedDeviceId().length > 0 && !inputs.some((device) => device.id === selectedDeviceId())) {
         setSelectedDeviceId("");
         setPreferredAudioInputDeviceId(null);
       }
@@ -68,19 +75,18 @@ export function SettingsView() {
   };
 
   const requestPermission = async () => {
-    if (!navigator.mediaDevices?.getUserMedia) {
-      setError("Microphone access is not available in this runtime.");
-      return;
-    }
-
     setInfo(null);
     setError(null);
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      for (const track of stream.getTracks()) {
-        track.stop();
+      const permission = await requestMicrophonePermission();
+      setHasPermission(permission.granted);
+      if (!permission.granted) {
+        setError(permission.canRequest
+          ? "Microphone permission was not granted."
+          : "Microphone permission is denied at the system level.");
+        return;
       }
-      setInfo("Microphone permission granted. Device labels are now available.");
+      setInfo("Microphone permission granted.");
       await refreshDevices();
     } catch (permissionError) {
       setError(normalizeError(permissionError));
@@ -105,12 +111,21 @@ export function SettingsView() {
         description="Configure microphone defaults for in-app recording. Choose which input device Audio X should use before opening the Record view.">
         <section class="space-y-4 rounded-3xl border border-overlay bg-elevation/85 p-6">
           <p role="alert" class="rounded-xl border border-accent/50 bg-accent/10 p-3 text-sm text-text">
-            This environment does not expose Web Media APIs, so microphone device controls are unavailable.
+            This view requires the native Tauri runtime.
           </p>
         </section>
       </ViewScaffold>
     );
   }
+
+  const selectedDeviceName = () => {
+    const selected = selectedDeviceId();
+    if (!selected) {
+      return "System default input";
+    }
+    const device = devices().find((item) => item.id === selected);
+    return device?.name || "Saved input device";
+  };
 
   return (
     <ViewScaffold
@@ -130,8 +145,8 @@ export function SettingsView() {
               onClick={() => {
                 void requestPermission();
               }}
-              disabled={isLoading()}>
-              Enable mic access
+              disabled={isLoading() || hasPermission()}>
+              {hasPermission() ? "Permission granted" : "Enable mic access"}
             </button>
             <button
               type="button"
@@ -147,7 +162,11 @@ export function SettingsView() {
 
         <DeviceSelector devices={devices()} selectedDeviceId={selectedDeviceId()} onDeviceChange={onDeviceChange} />
 
-        {devices().length === 0 && !isLoading() && (
+        <p class="rounded-xl border border-overlay bg-surface/35 px-3 py-2 text-xs text-subtext">
+          Preferred input: {selectedDeviceName()}.
+        </p>
+
+        {devices().length === 0 && hasPermission() && !isLoading() && (
           <p class="rounded-xl border border-overlay bg-surface/35 px-3 py-2 text-xs text-subtext">
             No audio inputs were detected. Connect a microphone and refresh the device list.
           </p>

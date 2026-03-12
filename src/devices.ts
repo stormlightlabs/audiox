@@ -1,16 +1,44 @@
+import * as logger from "@tauri-apps/plugin-log";
+import {
+  checkPermission,
+  getDevices,
+  type PermissionResponse,
+  requestPermission,
+} from "tauri-plugin-audio-recorder-api";
+
 const AUDIO_INPUT_DEVICE_STORAGE_KEY = "audiox:recording:device-id";
 
-export function supportsMediaRecording(): boolean {
-  return typeof navigator !== "undefined" && "mediaDevices" in navigator && "MediaRecorder" in globalThis;
+export type AudioInputDevice = { id: string; name: string; isDefault: boolean };
+
+function isTauriRuntime(): boolean {
+  return globalThis.window !== undefined && "__TAURI_INTERNALS__" in globalThis;
 }
 
-export async function listAudioInputDevices(): Promise<MediaDeviceInfo[]> {
-  if (!navigator.mediaDevices?.enumerateDevices) {
+export function supportsMediaRecording(): boolean {
+  return isTauriRuntime();
+}
+
+export async function listAudioInputDevices(): Promise<AudioInputDevice[]> {
+  if (!isTauriRuntime()) {
     return [];
   }
 
-  const devices = await navigator.mediaDevices.enumerateDevices();
-  return devices.filter((device) => device.kind === "audioinput");
+  const response = await getDevices();
+  return response.devices ?? [];
+}
+
+export async function checkMicrophonePermission(): Promise<PermissionResponse> {
+  if (!isTauriRuntime()) {
+    return { granted: false, canRequest: false };
+  }
+  return checkPermission();
+}
+
+export async function requestMicrophonePermission(): Promise<PermissionResponse> {
+  if (!isTauriRuntime()) {
+    return { granted: false, canRequest: false };
+  }
+  return requestPermission();
 }
 
 export function getPreferredAudioInputDeviceId(): string | null {
@@ -30,6 +58,6 @@ export function setPreferredAudioInputDeviceId(deviceId: string | null): void {
     }
     localStorage.setItem(AUDIO_INPUT_DEVICE_STORAGE_KEY, deviceId);
   } catch {
-    // Ignore storage failures in private mode or browser-only tests.
+    logger.warn("ignore storage failures in private mode or browser-only tests.");
   }
 }

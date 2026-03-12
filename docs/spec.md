@@ -106,7 +106,7 @@ type PreflightResult = {
   ollama_server: CheckStatus; // server reachable
   ollama_models: CheckStatus; // required models present
   database: CheckStatus; // db accessible
-}
+};
 type CheckStatus = "pass" | "fail" | "warn";
 ```
 
@@ -174,15 +174,65 @@ Generated subtitle files are saved to `appdata/subtitles/<document_uuid>.*`.
 
 ### Audio Recording
 
-Use the **Web Audio API / MediaRecorder** in the frontend WebView to capture microphone input. This avoids native plugin dependencies and works cross-platform in Tauri's WebView.
+Use **`tauri-plugin-audio-recorder`** for cross-platform microphone recording via native Rust (cpal-based), instead of WebView `getUserMedia`/`MediaRecorder`.
 
-Flow:
+**Why not WebView getUserMedia:**
 
-1. `navigator.mediaDevices.getUserMedia({ audio: true })` → MediaStream
-2. `MediaRecorder` with `audio/webm;codecs=opus` (or wav via AudioWorklet)
-3. On stop, send blob to Rust backend via IPC
-4. Rust passes to ffmpeg sidecar for conversion to 16kHz mono WAV, saves to `appdata/audio/`
-5. Trigger transcription pipeline
+- **Linux:** WebKitGTK ships without WebRTC/MediaStream support (`-DENABLE_WEB_RTC=ON -DENABLE_MEDIA_STREAM=ON` are off by default). Recording via `getUserMedia` is non-functional on most Linux distributions without a custom-compiled WebKitGTK.
+- **macOS:** WKWebView only supports `audio/mp4` (AAC) via MediaRecorder — no `audio/webm` support. Users may see duplicate permission prompts (OS-level + webview-level) on macOS 14+.
+- **Windows:** WebView2 (Chromium) supports `audio/webm;codecs=opus` but persists permission state in a way that makes re-prompting impossible if the user clicks "Block" without deleting the WebView2 Preferences file.
+
+A native Rust plugin bypasses all webview engine differences and works reliably across all platforms.
+
+**Plugin:** [`tauri-plugin-audio-recorder`](https://github.com/brenogonzaga/tauri-plugin-audio-recorder)
+
+- **Platforms:** macOS, Windows, Linux (also iOS, Android)
+- **Output:** WAV on desktop, M4A/AAC on mobile
+- **Quality presets:** Low (16kHz mono), Medium (44.1kHz mono), High (48kHz stereo)
+- **API:** `startRecording()`, `stopRecording()`, `pauseRecording()`, `resumeRecording()`, `getStatus()`, `getDevices()`, `checkPermission()`, `requestPermission()`
+
+**Setup:**
+
+```bash
+cargo add tauri-plugin-audio-recorder
+npm install tauri-plugin-audio-recorder-api
+```
+
+```rust
+// src-tauri/src/lib.rs
+tauri::Builder::default()
+    .plugin(tauri_plugin_audio_recorder::init())
+```
+
+Add to `src-tauri/capabilities/default.json`:
+
+```json
+"permissions": [
+  "audio-recorder:default"
+]
+```
+
+**macOS entitlement:** Add `src-tauri/Info.plist`:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>This app needs microphone access to record audio for transcription.</string>
+</dict>
+</plist>
+```
+
+**Flow:**
+
+1. Frontend calls `checkPermission()` → if denied, call `requestPermission()`
+2. `startRecording({ quality: 'low' })` — records 16kHz mono WAV (matches whisper-cli input directly)
+3. UI shows live waveform, elapsed time, pause/resume controls
+4. `stopRecording()` → returns path to saved WAV file in `appdata/audio/`
+5. Feed WAV into transcription pipeline (ffmpeg conversion may be skipped if already 16kHz mono)
 
 ## 3. yt-dlp Integration
 
@@ -512,7 +562,7 @@ type AppState = {
     meta: YtDlpMeta | null; // preview card data
     progress: number; // download percentage
   };
-}
+};
 ```
 
 ### Tauri IPC Commands
@@ -566,11 +616,12 @@ Preflight resolution strategy:
 
 ### Tauri Plugins Required
 
-| Plugin      | Crate                 | JS Package                  | Purpose                       |
-| ----------- | --------------------- | --------------------------- | ----------------------------- |
-| Shell       | `tauri-plugin-shell`  | `@tauri-apps/plugin-shell`  | Execute external tools safely |
-| File System | `tauri-plugin-fs`     | `@tauri-apps/plugin-fs`     | Read/write appdata files      |
-| Dialog      | `tauri-plugin-dialog` | `@tauri-apps/plugin-dialog` | File picker for audio import  |
+| Plugin         | Crate                         | JS Package                        | Purpose                                   |
+| -------------- | ----------------------------- | --------------------------------- | ----------------------------------------- |
+| Shell          | `tauri-plugin-shell`          | `@tauri-apps/plugin-shell`        | Execute external tools safely             |
+| File System    | `tauri-plugin-fs`             | `@tauri-apps/plugin-fs`           | Read/write appdata files                  |
+| Dialog         | `tauri-plugin-dialog`         | `@tauri-apps/plugin-dialog`       | File picker for audio import              |
+| Audio Recorder | `tauri-plugin-audio-recorder` | `tauri-plugin-audio-recorder-api` | Native mic recording (cpal-based, all OS) |
 
 ### Rust Dependencies (additional)
 

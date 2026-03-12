@@ -4,7 +4,6 @@ mod models;
 mod parsers;
 mod storage;
 
-use crate::storage::bootstrap_from_app;
 use std::fs;
 use tauri::Manager;
 
@@ -15,10 +14,13 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_audio_recorder::init())
         .setup(|app| {
             let app_data_dir = app.path().app_data_dir().map_err(std::io::Error::other)?;
             let log_dir = app_data_dir.join("logs");
+
             fs::create_dir_all(&log_dir).map_err(std::io::Error::other)?;
+
             app.manage(storage::StorageState::from_app_data_dir(app_data_dir));
 
             app.handle()
@@ -36,7 +38,7 @@ pub fn run() {
                 )
                 .map_err(std::io::Error::other)?;
 
-            bootstrap_from_app(app.handle()).map_err(std::io::Error::other)?;
+            storage::bootstrap_from_app(app.handle()).map_err(std::io::Error::other)?;
             log::info!("Audio X bootstrap complete.");
             Ok(())
         })
