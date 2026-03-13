@@ -138,6 +138,7 @@ function PasteNoteInput(
     </section>
   );
 }
+
 function NotesHeader(props: { pickTextFile: () => void; isImporting: boolean }) {
   const isImporting = () => props.isImporting;
 
@@ -202,6 +203,11 @@ export function ImportView() {
     setTranscriptionProgress(null);
     setMetadataProgress(null);
     setLastImportedDocument(null);
+  };
+
+  const clearNotePreview = () => {
+    setError(null);
+    setNotePreview(null);
   };
 
   const importAudio = async (sourcePath: string) => {
@@ -445,28 +451,39 @@ export function ImportView() {
                 <section class="space-y-2 rounded-2xl border border-overlay bg-elevation/60 p-4">
                   <div class="flex flex-wrap items-center justify-between gap-2">
                     <p class="text-sm font-semibold text-text">Preview: {preview().sourceName}</p>
-                    <button
-                      type="button"
-                      class="rounded-xl bg-accent px-3 py-1.5 text-xs font-semibold text-surface transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-60"
-                      onClick={() => {
-                        void importTextNote(preview());
-                      }}
-                      disabled={isImporting()}>
-                      {isImporting() ? "Processing..." : "Process note file"}
-                    </button>
+                    <div class="flex flex-wrap items-center gap-2">
+                      <button
+                        type="button"
+                        class="rounded-xl border border-overlay px-3 py-1.5 text-xs font-semibold text-subtext transition hover:border-accent/35 hover:text-text disabled:cursor-not-allowed disabled:opacity-60"
+                        onClick={clearNotePreview}
+                        disabled={isImporting()}>
+                        Remove file
+                      </button>
+                      <button
+                        type="button"
+                        class="rounded-xl bg-accent px-3 py-1.5 text-xs font-semibold text-surface transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-60"
+                        onClick={() => {
+                          void importTextNote(preview());
+                        }}
+                        disabled={isImporting()}>
+                        {isImporting() ? "Processing..." : "Process note file"}
+                      </button>
+                    </div>
                   </div>
                   <p class="text-xs text-subtext whitespace-pre-wrap">{snippet(preview().content) || "(empty note)"}</p>
                 </section>
               )}
             </Show>
 
-            <PasteNoteInput
-              pasteTitle={pasteTitle()}
-              pasteContent={pasteContent()}
-              importPastedText={importPastedText}
-              isImporting={isImporting()}
-              updatePasteTitle={(value) => void setPasteTitle(value)}
-              updatePasteContent={(value) => void setPasteContent(value)} />
+            <Show when={!notePreview()}>
+              <PasteNoteInput
+                pasteTitle={pasteTitle()}
+                pasteContent={pasteContent()}
+                importPastedText={importPastedText}
+                isImporting={isImporting()}
+                updatePasteTitle={(value) => void setPasteTitle(value)}
+                updatePasteContent={(value) => void setPasteContent(value)} />
+            </Show>
           </article>
         </Show>
 

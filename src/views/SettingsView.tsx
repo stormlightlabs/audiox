@@ -84,6 +84,15 @@ function DeviceSelector(props: DeviceSelectorProps) {
   );
 }
 
+function Refresher() {
+  return (
+    <span class="flex items-center gap-1">
+      <i class="i-ri-loader-line animate-spin" />
+      <span>Refreshing...</span>
+    </span>
+  );
+}
+
 function RecordingDeviceActions(
   props: { isLoading: boolean; hasPermission: boolean; requestPermission: () => void; refreshDevices: () => void },
 ) {
@@ -103,7 +112,7 @@ function RecordingDeviceActions(
             void props.requestPermission();
           }}
           disabled={isLoading() || hasPermission()}>
-          {hasPermission() ? "Permission granted" : "Enable mic access"}
+          <Show when={hasPermission()} fallback={"Enable mic access"}>Permission granted</Show>
         </button>
         <button
           type="button"
@@ -112,7 +121,9 @@ function RecordingDeviceActions(
             void props.refreshDevices();
           }}
           disabled={isLoading()}>
-          {isLoading() ? "Refreshing..." : "Refresh list"}
+          <Show when={isLoading()} fallback={"Refresh list"}>
+            <Refresher />
+          </Show>
         </button>
       </div>
     </div>

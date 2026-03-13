@@ -44,3 +44,145 @@ button {
   background-color: color-mix(in srgb, var(--color-accent) 40%, transparent);
   color: var(--color-text);
 }
+
+.markdown-body {
+  @apply grid gap-4;
+}
+
+.markdown-body > :first-child {
+  margin-top: 0;
+}
+
+.markdown-body > :last-child {
+  margin-bottom: 0;
+}
+
+.markdown-body :where(h1, h2, h3, h4, h5, h6) {
+  @apply m-0 font-semibold leading-tight text-text;
+  font-family: var(--font-display);
+}
+
+.markdown-body h1 {
+  @apply text-3xl;
+}
+
+.markdown-body h2 {
+  @apply text-2xl;
+}
+
+.markdown-body h3 {
+  @apply text-xl;
+}
+
+.markdown-body h4 {
+  @apply text-lg;
+}
+
+.markdown-body h5,
+.markdown-body h6 {
+  @apply text-base;
+}
+
+.markdown-body :where(p, li, td, th, blockquote) {
+  @apply text-[0.95rem] leading-7 text-text;
+}
+
+.markdown-body :where(p, ul, ol, blockquote, table, pre, hr) {
+  @apply m-0;
+}
+
+.markdown-body ul,
+.markdown-body ol {
+  @apply grid gap-1.5 pl-6;
+}
+
+.markdown-body ul {
+  list-style: disc;
+}
+
+.markdown-body ol {
+  list-style: decimal;
+}
+
+.markdown-body li > ul,
+.markdown-body li > ol {
+  @apply mt-2;
+}
+
+.markdown-body li::marker {
+  color: color-mix(in srgb, var(--color-accent) 65%, var(--color-text));
+}
+
+.markdown-body li input[type="checkbox"] {
+  @apply mr-2;
+  accent-color: var(--color-accent);
+}
+
+.markdown-body a {
+  @apply underline underline-offset-[0.18rem];
+  color: color-mix(in srgb, var(--color-accent) 88%, white);
+  text-decoration-color: color-mix(in srgb, var(--color-accent) 45%, transparent);
+}
+
+.markdown-body a:hover {
+  text-decoration-color: currentcolor;
+}
+
+.markdown-body strong {
+  @apply font-bold;
+}
+
+.markdown-body del {
+  @apply text-subtext;
+}
+
+.markdown-body code {
+  @apply rounded-md border border-overlay bg-elevation px-1.5 py-0.5 text-[0.82em];
+}
+
+.markdown-body pre {
+  @apply overflow-x-auto rounded-2xl border border-overlay p-4;
+  box-shadow: inset 0 1px 0 color-mix(in srgb, white 3%, transparent);
+}
+
+.markdown-body pre code {
+  @apply border-0 bg-transparent p-0 text-[0.82rem];
+}
+
+.markdown-body blockquote {
+  @apply rounded-r-2xl border-l-3 border-accent/55 bg-elevation/80 px-4 py-3;
+}
+
+.markdown-body blockquote > :where(p, ul, ol):not(:first-child) {
+  @apply mt-3;
+}
+
+.markdown-body table {
+  @apply w-full overflow-hidden rounded-2xl border border-overlay;
+  border-collapse: collapse;
+}
+
+.markdown-body thead {
+  @apply bg-elevation;
+}
+
+.markdown-body :where(th, td) {
+  @apply border border-overlay px-3 py-2.5 text-left align-top;
+}
+
+.markdown-body th {
+  @apply text-[0.78rem] font-bold tracking-[0.04em] uppercase text-subtext;
+}
+
+.markdown-body hr {
+  border: 0;
+  border-top: 1px solid color-mix(in srgb, var(--color-overlay) 85%, transparent);
+}
+
+.markdown-body img {
+  @apply block max-w-full rounded-2xl;
+}
+
+.markdown-body .footnotes {
+  @apply border-t border-overlay pt-4;
+}

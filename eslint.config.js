@@ -23,7 +23,7 @@ export default defineConfig(
   },
   { files: ["scripts/**/*.{js,mjs,cjs}", "vite.config.ts"], languageOptions: { globals: globals.node } },
   { files: ["**/*.tsx"], plugins: { react }, rules: { "react/jsx-max-depth": ["error", { max: 4 }] } },
-  { files: ["**/*.tsx"], ...solidConfig },
+  { files: ["**/*.tsx"], ...solidConfig, rules: { "solid/no-innerhtml": "off" } },
   {
     rules: {
       "unicorn/catch-error-name": "off",

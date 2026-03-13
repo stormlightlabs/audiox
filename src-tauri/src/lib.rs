@@ -1,6 +1,7 @@
 mod bootstrap;
 mod commands;
 mod embedding;
+mod markdown;
 mod models;
 mod parsers;
 mod storage;
@@ -63,6 +64,8 @@ pub fn run() {
             commands::import_text_note,
             commands::import_text_content,
             commands::list_documents,
+            markdown::list_markdown_themes,
+            markdown::render_markdown,
             commands::get_document,
             commands::update_document,
             commands::enrich_document_metadata,

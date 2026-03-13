@@ -5,7 +5,8 @@ import { A, useParams, useSearchParams } from "@solidjs/router";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import * as logger from "@tauri-apps/plugin-log";
-import { createEffect, createSignal, For, type JSX, onCleanup, onMount, Show } from "solid-js";
+import { createEffect, createSignal, For, onCleanup, onMount, Show } from "solid-js";
+import { Markdown } from "../components/Markdown";
 import { ViewScaffold } from "./ViewScaffold";
 
 const DOCUMENT_METADATA_PROGRESS_EVENT = "document://metadata-progress";
@@ -29,8 +30,6 @@ type DocumentDetail = {
   updatedAt: string;
   segments: TranscriptSegment[];
 };
-
-type RenderableSegment = string | JSX.Element;
 
 function parseTagsInput(raw: string): string[] {
   const deduped = new Set<string>();
@@ -105,108 +104,6 @@ function isMarkdownSource(document: DocumentDetail): boolean {
     return false;
   }
   return document.sourceUri.trim().toLowerCase().endsWith(".md");
-}
-
-function renderInlineCode(text: string): RenderableSegment[] {
-  const parts = text.split(/(`[^`]+`)/gu);
-  return parts.map((part) => {
-    if (part.startsWith("`") && part.endsWith("`") && part.length >= 2) {
-      return <code class="rounded bg-surface/80 px-1 py-0.5 text-xs text-text">{part.slice(1, -1)}</code>;
-    }
-    return part;
-  });
-}
-
-function renderMarkdownBlocks(content: string) {
-  const lines = content.replaceAll("\r\n", "\n").split("\n");
-  const blocks: JSX.Element[] = [];
-  let index = 0;
-
-  while (index < lines.length) {
-    const current = lines[index].trimEnd();
-    if (!current.trim()) {
-      index += 1;
-      continue;
-    }
-
-    const fencedCode = /^```([^\s`]+)?\s*$/u.exec(current.trim());
-    if (fencedCode) {
-      const language = fencedCode[1]?.trim() || "text";
-      index += 1;
-      const codeLines: string[] = [];
-      while (index < lines.length && !lines[index].trim().startsWith("```")) {
-        codeLines.push(lines[index]);
-        index += 1;
-      }
-      if (index < lines.length) {
-        index += 1;
-      }
-      blocks.push(
-        <pre class="overflow-x-auto rounded-2xl border border-overlay bg-surface/80 p-3">
-          <code data-language={language} class="text-xs text-text whitespace-pre-wrap">
-            {codeLines.join("\n")}
-          </code>
-        </pre>,
-      );
-      continue;
-    }
-
-    const heading = /^(#{1,6})\s+(.+)$/u.exec(current.trim());
-    if (heading) {
-      const level = heading[1].length;
-      const contentValue = heading[2].trim();
-      const classByLevel = ["text-2xl", "text-xl", "text-lg", "text-base", "text-sm", "text-sm"] as const;
-      blocks.push(
-        <p class={`font-semibold text-text ${classByLevel[Math.min(level - 1, 5)]}`}>
-          {renderInlineCode(contentValue)}
-        </p>,
-      );
-      index += 1;
-      continue;
-    }
-
-    if (/^\s*[-*+]\s+/.test(current)) {
-      const listItems: string[] = [];
-      while (index < lines.length && /^\s*[-*+]\s+/.test(lines[index])) {
-        const item = lines[index].replace(/^\s*[-*+]\s+/u, "").trim();
-        if (item) {
-          listItems.push(item);
-        }
-        index += 1;
-      }
-
-      blocks.push(
-        <ul class="grid gap-1 pl-5 text-sm text-text list-disc">
-          <For each={listItems}>{(item) => <li>{renderInlineCode(item)}</li>}</For>
-        </ul>,
-      );
-      continue;
-    }
-
-    const paragraphLines: string[] = [];
-    while (index < lines.length) {
-      const candidate = lines[index].trimEnd();
-      if (!candidate.trim()) {
-        break;
-      }
-      if (
-        candidate.trim().startsWith("```") || /^(#{1,6})\s+/u.test(candidate.trim()) || /^\s*[-*+]\s+/.test(candidate)
-      ) {
-        break;
-      }
-      paragraphLines.push(candidate.trim());
-      index += 1;
-    }
-
-    if (paragraphLines.length > 0) {
-      blocks.push(<p class="text-sm leading-relaxed text-text">{renderInlineCode(paragraphLines.join(" "))}</p>);
-      continue;
-    }
-
-    index += 1;
-  }
-
-  return <div class="grid gap-3">{blocks}</div>;
 }
 
 function LoadingSkeleton() {
@@ -659,7 +556,7 @@ export function DocumentView() {
                         {currentDocument().transcript}
                       </p>
                     }>
-                    {renderMarkdownBlocks(currentDocument().transcript)}
+                    <Markdown content={currentDocument().transcript} />
                   </Show>
                 </Show>
 

@@ -87,7 +87,7 @@ Each milestone produces a usable app. Later milestones build on earlier ones.
 - [x] App icon and branding
 - [ ] Allow playback of imported audio files
 
-## M14: Text Note Import (.txt / .md)
+## ✅ M14: Text Note Import (.txt / .md)
 
 **Goal:** Import plain text or Markdown notes and generate metadata, summaries, keywords, and embeddings, bypassing the audio/transcription pipeline entirely.
 

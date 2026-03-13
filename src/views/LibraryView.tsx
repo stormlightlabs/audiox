@@ -238,6 +238,7 @@ export function LibraryView() {
   const [searchResults, setSearchResults] = createSignal<SearchResult[]>([]);
   const [isSearching, setIsSearching] = createSignal(false);
   const [searchError, setSearchError] = createSignal<string | null>(null);
+  const isEmpty = createMemo(() => !isLoading() && visibleDocuments().length === 0 && activeSearchQuery().length === 0);
 
   // eslint-disable-next-line no-unassigned-vars
   let searchInputRef: HTMLInputElement | undefined;
@@ -468,7 +469,7 @@ export function LibraryView() {
           )}
         </Show>
 
-        <Show when={!isLoading() && visibleDocuments().length === 0 && activeSearchQuery().length === 0}>
+        <Show when={isEmpty()}>
           <EmptyState />
         </Show>
 
@@ -526,25 +527,25 @@ export function LibraryView() {
           </section>
         </Show>
 
-        <Show when={isLoading()}>
-          <div class="grid gap-3">
-            <For each={[0, 1, 2]}>
-              {(item) => (
-                <article
-                  aria-hidden="true"
-                  class="animate-pulse rounded-2xl border border-overlay bg-surface/30 p-4"
-                  data-index={item}>
-                  <div class="h-4 w-1/3 rounded bg-overlay/70" />
-                  <div class="mt-3 h-3 w-11/12 rounded bg-overlay/60" />
-                  <div class="mt-2 h-3 w-7/12 rounded bg-overlay/60" />
-                  <div class="mt-3 h-2 w-5/12 rounded bg-overlay/50" />
-                </article>
-              )}
-            </For>
-          </div>
-        </Show>
-
-        <Show when={!isLoading()}>
+        <Show
+          when={!isLoading()}
+          fallback={
+            <div class="grid gap-3">
+              <For each={[0, 1, 2]}>
+                {(item) => (
+                  <article
+                    aria-hidden="true"
+                    class="animate-pulse rounded-2xl border border-overlay bg-surface/30 p-4"
+                    data-index={item}>
+                    <div class="h-4 w-1/3 rounded bg-overlay/70" />
+                    <div class="mt-3 h-3 w-11/12 rounded bg-overlay/60" />
+                    <div class="mt-2 h-3 w-7/12 rounded bg-overlay/60" />
+                    <div class="mt-3 h-2 w-5/12 rounded bg-overlay/50" />
+                  </article>
+                )}
+              </For>
+            </div>
+          }>
           <For each={visibleDocuments()}>
             {(document, index) => (
               <Motion.article
