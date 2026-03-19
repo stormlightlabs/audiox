@@ -1,6 +1,6 @@
 # Architecture
 
-Audio X is a Tauri 2 desktop app (SolidJS + Tailwind v4 frontend, Rust backend) that transcribes audio to text using whisper.cpp and builds a searchable document library from transcripts. Embeddings are generated locally via fastembed-rs (ONNX Runtime), while Ollama-hosted Gemma models handle text generation (titles, summaries, keywords). It supports local audio files, microphone recording, and URL-based media import via yt-dlp.
+Murmur is a Tauri 2 desktop app (SolidJS + Tailwind v4 frontend, Rust backend) that transcribes audio to text using whisper.cpp and builds a searchable document library from transcripts. Embeddings are generated locally via fastembed-rs (ONNX Runtime), while Ollama-hosted Gemma models handle text generation (titles, summaries, keywords). It supports local audio files, microphone recording, and URL-based media import via yt-dlp.
 
 ```text
 ┌───────────────────────────────────────────────────────┐

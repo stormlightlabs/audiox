@@ -34,7 +34,7 @@ pub fn run() {
                             tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::Stdout),
                             tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::Folder {
                                 path: log_dir,
-                                file_name: Some("audiox".to_string()),
+                                file_name: Some("murmur".to_string()),
                             }),
                         ])
                         .build(),
@@ -42,7 +42,7 @@ pub fn run() {
                 .map_err(std::io::Error::other)?;
 
             storage::bootstrap_from_app(app.handle()).map_err(std::io::Error::other)?;
-            log::info!("Audio X bootstrap complete.");
+            log::info!("Murmur bootstrap complete.");
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -92,7 +92,7 @@ mod tests {
             .expect("system clock should be after unix epoch")
             .as_nanos();
 
-        std::env::temp_dir().join(format!("audiox-{label}-{now}"))
+        std::env::temp_dir().join(format!("murmur-{label}-{now}"))
     }
 
     fn table_exists(connection: &Connection, table_name: &str) -> bool {
@@ -153,7 +153,7 @@ mod tests {
         let test_root = temp_dir_path("sidecar-fallback");
         fs::create_dir_all(&test_root).expect("test root should be created");
 
-        let failing_sidecar = test_root.join("audiox-sidecar-fail");
+        let failing_sidecar = test_root.join("murmur-sidecar-fail");
         fs::write(&failing_sidecar, "#!/bin/sh\nexit 9\n").expect("failing sidecar should be written");
         let mut permissions = fs::metadata(&failing_sidecar)
             .expect("failing sidecar metadata should be readable")
@@ -166,15 +166,15 @@ mod tests {
 
         let spec = models::RuntimeBinarySpec {
             check: models::PreflightCheck::WhisperCli,
-            tool_id: "audiox-sidecar-fail",
-            display_name: "audiox-sidecar-fail",
+            tool_id: "murmur-sidecar-fail",
+            display_name: "murmur-sidecar-fail",
             version: "runtime",
-            executable_stem: "audiox-sidecar-fail",
+            executable_stem: "murmur-sidecar-fail",
             version_args: &["--version"],
             path_candidates: &[],
             sidecar_candidates,
-            download_url_env: "AUDIOX_SIDE_TEST_URL",
-            download_sha256_env: "AUDIOX_SIDE_TEST_SHA256",
+            download_url_env: "MURMUR_SIDE_TEST_URL",
+            download_sha256_env: "MURMUR_SIDE_TEST_SHA256",
             allow_runtime_download: false,
         };
 

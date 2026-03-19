@@ -581,7 +581,7 @@ export function SettingsView() {
         <ViewScaffold
           eyebrow="Settings"
           title="System configuration"
-          description="Configure microphone defaults for in-app recording. Choose which input device Audio X should use before opening the Record view.">
+          description="Configure microphone defaults for in-app recording. Choose which input device Murmur should use before opening the Record view.">
           <section class="space-y-4 rounded-3xl border border-overlay bg-elevation/85 p-6">
             <p role="alert" class="rounded-xl border border-accent/50 bg-accent/10 p-3 text-sm text-text">
               This view requires the native Tauri runtime.

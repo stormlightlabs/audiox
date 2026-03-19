@@ -41,7 +41,7 @@ const failingPreflight = {
         ...detail,
         status: "fail",
         message:
-          "whisper-cli is unavailable. Reinstall Audio X to restore bundled dependencies. For local development, run `bash setup.sh` and ensure 'whisper-cli' is installed on PATH.",
+          "whisper-cli is unavailable. Reinstall Murmur to restore bundled dependencies. For local development, run `bash setup.sh` and ensure 'whisper-cli' is installed on PATH.",
       }
       : detail
   ),
@@ -79,7 +79,7 @@ describe("Preflight flow", () => {
     invokeMock.mockResolvedValue(successfulPreflight);
     render(() => <App />);
 
-    expect(await screen.findByRole("heading", { name: "Audio X" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Murmur" })).toBeInTheDocument();
     expect(listenMock).toHaveBeenCalledWith("preflight://check", expect.any(Function));
     await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("preflight"));
     await waitFor(() => expect(screen.getByRole("heading", { name: "Document library" })).toBeInTheDocument(), {
@@ -110,9 +110,9 @@ describe("Preflight flow", () => {
     invokeMock.mockResolvedValueOnce(failingPreflight).mockResolvedValueOnce(successfulPreflight);
     render(() => <App />);
 
-    expect(await screen.findByRole("heading", { name: "Audio X" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Murmur" })).toBeInTheDocument();
     const guidanceMatches = await screen.findAllByText(
-      "whisper-cli is unavailable. Reinstall Audio X to restore bundled dependencies. For local development, run `bash setup.sh` and ensure 'whisper-cli' is installed on PATH.",
+      "whisper-cli is unavailable. Reinstall Murmur to restore bundled dependencies. For local development, run `bash setup.sh` and ensure 'whisper-cli' is installed on PATH.",
     );
     expect(guidanceMatches.length).toBeGreaterThan(0);
 
@@ -135,7 +135,7 @@ describe("Preflight flow", () => {
     });
     render(() => <App />);
 
-    expect(await screen.findByRole("heading", { name: "Audio X" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Murmur" })).toBeInTheDocument();
     await waitFor(() => expect(screen.getByRole("heading", { name: "First-run setup wizard" })).toBeInTheDocument(), {
       timeout: 3000,
     });

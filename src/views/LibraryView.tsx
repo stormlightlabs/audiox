@@ -358,9 +358,9 @@ export function LibraryView() {
   };
 
   onMount(() => {
-    globalThis.addEventListener("audiox:focus-library-search", focusSearchHandler);
+    globalThis.addEventListener("murmur:focus-library-search", focusSearchHandler);
     onCleanup(() => {
-      globalThis.removeEventListener("audiox:focus-library-search", focusSearchHandler);
+      globalThis.removeEventListener("murmur:focus-library-search", focusSearchHandler);
     });
   });
 

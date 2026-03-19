@@ -1,17 +1,15 @@
 [package]
-name = "audiox"
+name = "murmur"
 version = "0.1.0"
 description = "A Tauri App"
-authors = ["you"]
+authors = ["Owais Jamil"]
 edition = "2021"
-
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [lib]
 # The `_lib` suffix may seem redundant but it is necessary
 # to make the lib name unique and wouldn't conflict with the bin name.
 # This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
-name = "audiox_lib"
+name = "murmur_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
@@ -27,8 +25,17 @@ tauri-plugin-log = "2"
 log = "0.4"
 rusqlite = { version = "0.37.0", features = ["bundled"] }
 uuid = { version = "1.18.1", features = ["v4", "serde"] }
-reqwest = { version = "0.12.24", default-features = false, features = ["json", "rustls-tls", "stream"] }
-tokio = { version = "1.48.0", features = ["rt-multi-thread", "macros", "process", "io-util"] }
+reqwest = { version = "0.12.24", default-features = false, features = [
+    "json",
+    "rustls-tls",
+    "stream",
+] }
+tokio = { version = "1.48.0", features = [
+    "rt-multi-thread",
+    "macros",
+    "process",
+    "io-util",
+] }
 chrono = { version = "0.4.42", features = ["serde"] }
 regex = "1.12.2"
 sha2 = "0.10.9"
@@ -36,7 +43,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tauri-plugin-audio-recorder = "0.1"
 fastembed = "5"
-comrak = {version = "0.51.0", features = ["syntect"] }
+comrak = { version = "0.51.0", features = ["syntect"] }
 syntect = "5.3.0"
 
 [lints.clippy]

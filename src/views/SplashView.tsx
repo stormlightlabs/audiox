@@ -153,7 +153,7 @@ export function SplashView() {
           </div>
           <div class="space-y-2">
             <p class="text-xs tracking-[0.24em] text-subtext uppercase">Startup Preflight</p>
-            <h1 class="font-display text-4xl text-text">Audio X</h1>
+            <h1 class="font-display text-4xl text-text">Murmur</h1>
             <p class="text-sm text-subtext">
               Checking sidecars, local models, Ollama generate support, and local database before opening the app.
             </p>

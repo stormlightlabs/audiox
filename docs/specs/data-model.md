@@ -1,10 +1,10 @@
 # Data Model (SQLite)
 
-Use `rusqlite` in the Rust backend. Database stored at `appdata/db/audiox.db`.
+Use `rusqlite` in the Rust backend. Database stored at `appdata/db/murmur.db`.
 
 ## File System
 
-All runtime data lives under the Tauri `appDataDir` (`~/Library/Application Support/org.stormlightlabs.audiox/` on macOS):
+All runtime data lives under the Tauri `appDataDir` (`~/Library/Application Support/org.stormlightlabs.murmur/` on macOS):
 
 ```sh
 appdata/
@@ -22,7 +22,7 @@ appdata/
   bin/
     yt-dlp/<version>/         # optional runtime-managed yt-dlp executable
   db/
-    audiox.db                 # SQLite database
+    murmur.db                 # SQLite database
 ```
 
 ## Database

@@ -789,7 +789,7 @@ pub fn set_window_title(window: tauri::WebviewWindow, title: String) -> Result<(
 
 #[tauri::command]
 pub fn get_app_version() -> String {
-    option_env!("AUDIOX_APP_VERSION")
+    option_env!("MURMUR_APP_VERSION")
         .filter(|value| !value.trim().is_empty())
         .unwrap_or(env!("CARGO_PKG_VERSION"))
         .to_string()

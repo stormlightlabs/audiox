@@ -1,5 +1,5 @@
 <!-- markdownlint-disable MD033 -->
-# Audio X
+# Murmur
 
 A desktop app that transcribes audio locally with [whisper.cpp](https://github.com/ggerganov/whisper.cpp) and builds a searchable document library using [Ollama](https://ollama.com) models.
 

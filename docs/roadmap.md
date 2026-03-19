@@ -1,4 +1,4 @@
-# Audio X Roadmap
+# Murmur Roadmap
 
 Each milestone produces a usable app. Later milestones build on earlier ones.
 
@@ -8,10 +8,95 @@ Each milestone produces a usable app. Later milestones build on earlier ones.
 - ~~Part 2: M5 - M7~~
 - ~~Part 3: M13~~
 - ~~Part 4: M9~~
-- Part 5: M11, M14
-- Part 6: M8
-- Part 7: M10
-- Part 8: M12
+- Part 5: M15, M16
+- Part 6: M11, M14
+- Part 7: M8
+- Part 8: M10
+- Part 9: M12
+
+## M15: Local Inference Engine (llama.cpp Sidecar)
+
+**Goal:** Replace Ollama as the default inference backend with a bundled llama-server
+sidecar for fully-local metadata generation.
+
+See [migration spec](specs/migration.md) for architecture details.
+
+### Backend
+
+- Add `llama-server` as a new `RuntimeBinarySpec` entry following the existing
+  sidecar pattern (platform-target-suffixed binaries in `src-tauri/binaries/`)
+- Introduce `LlamaServerState` as Tauri managed state to hold the child process
+  handle, assigned port, and idle shutdown timer
+- Lazy startup: spawn llama-server on first generation request, health-check via
+  `GET /health` before sending prompts
+- Idle shutdown: kill the server process after 60 seconds of inactivity to free
+  memory and GPU resources
+- Graceful cleanup: kill the child process on app exit via the state drop handler
+- GGUF model download with progress events, following the whisper model download
+  pattern in `bootstrap.rs`. Store models in `appdata/models/gguf/`
+- Abstract generation into a `GenerationBackend` dispatch so both llama-server
+  and Ollama share the same `process_document_ai` pipeline
+- Map the existing Ollama `/api/generate` call to llama-server's `/completion`
+  endpoint (prompt in, generated text out)
+- Retry logic, metadata parsing (`parse_generated_metadata`), and progress events
+  remain unchanged
+
+### Model tiers
+
+Three downloadable GGUF models:
+
+- Small: Gemma 3 1B Instruct Q4_K_M (~810 MB)
+- Default: Qwen2.5 1.5B Instruct Q5_K_M (~1.3 GB)
+- High: Qwen2.5 3B Instruct Q4_K_M (~2.1 GB)
+
+### Preflight and setup
+
+- Add `LlamaServer` variant to `PreflightCheck` enum
+- Check for llama-server binary availability during preflight
+  (same resolution chain: sidecar, managed path, system PATH)
+- Add `GgufModel` preflight check for whether a GGUF model is downloaded
+- Local inference checks use Pass/Warn (not Fail) since Ollama remains a
+  fallback option
+
+**Usable state:** Metadata generation works without Ollama installed. The app
+bundles llama-server, downloads a GGUF model on first use, and runs inference
+locally.
+
+## M16: Inference Backend Selection
+
+**Goal:** Let the user choose between local inference and Ollama, and select
+a model quality tier.
+
+### Backend
+
+- New setting key `inference_backend` with values `local` (default) and `ollama`
+- New setting key `local_model_tier` with values `small`, `default`, `high`
+- `save_app_settings` accepts the new settings and persists them
+- `load_runtime_settings` reads them and populates `AppSettings`
+- `process_document_ai` reads the backend setting and dispatches accordingly
+
+### Frontend
+
+- Settings view: new "Inference" section with:
+  - Backend toggle: Local / Ollama
+  - When Local is selected: model tier selector (Small / Default / High) with
+    file size displayed, download/delete buttons, and disk usage
+  - When Ollama is selected: existing endpoint configuration and model checks
+- Setup view: present the backend choice during first-run setup, defaulting
+  to Local. Trigger GGUF model download if Local is selected
+- Preflight splash: show llama-server and GGUF model status alongside existing
+  checks when Local backend is active
+
+### Preflight adaptations
+
+- When `inference_backend = local`: check llama-server binary and GGUF model
+  presence, skip Ollama server/model checks
+- When `inference_backend = ollama`: run existing Ollama checks, skip
+  llama-server/GGUF checks
+- `SetupStatus` and `PreflightResult` reflect the active backend only
+
+**Usable state:** User picks Local or Ollama during setup, selects a model
+quality tier, and can switch between backends from Settings at any time.
 
 ## M8: URL Import via yt-dlp
 

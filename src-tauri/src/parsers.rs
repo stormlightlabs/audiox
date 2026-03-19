@@ -1,15 +1,15 @@
 //! Parsing Utilities
 
+use crate::models::{OllamaModel, TranscriptSegment};
+use crate::models::{
+    ALLOWED_IMPORT_EXTENSIONS, ALLOWED_TEXT_IMPORT_EXTENSIONS, REQUIRED_OLLAMA_MODELS, WHISPER_LANGUAGE_AUTO,
+};
+
 use regex::Regex;
 use reqwest::Url;
 use serde_json::Value;
 use std::collections::HashSet;
 use std::path::Path;
-
-use crate::models::{
-    OllamaModel, TranscriptSegment, ALLOWED_IMPORT_EXTENSIONS, ALLOWED_TEXT_IMPORT_EXTENSIONS, REQUIRED_OLLAMA_MODELS,
-    WHISPER_LANGUAGE_AUTO,
-};
 
 pub fn parse_ollama_model_names(payload: &Value) -> Vec<String> {
     payload
@@ -58,7 +58,7 @@ pub fn missing_required_ollama_models(models: &[String]) -> Vec<String> {
     REQUIRED_OLLAMA_MODELS
         .iter()
         .filter(|required| !models.iter().any(|candidate| model_name_matches(candidate, required)))
-        .map(|required| required.to_string())
+        .map(|required| (*required).to_string())
         .collect()
 }
 
@@ -609,7 +609,7 @@ mod tests {
 
     #[test]
     fn supported_text_import_extensions_are_enforced() {
-        let temp_dir = std::env::temp_dir().join(format!("audiox-text-import-{}", uuid::Uuid::new_v4()));
+        let temp_dir = std::env::temp_dir().join(format!("murmur-text-import-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&temp_dir).expect("temp directory should be created");
         let markdown_path = temp_dir.join("note.md");
         std::fs::write(&markdown_path, "# notes").expect("markdown fixture should be written");

@@ -36,7 +36,8 @@ Brute-force cosine similarity (O(n) per query) is feasible for small datasets (<
 
 For desktop or edge applications where a full server is impractical:
 
-- **SQLite + brute-force**: store embeddings as BLOBs, compute cosine similarity in application code. AudioX uses this approach — viable for <10k chunks with sub-10ms query latency.
+- **SQLite + brute-force**: store embeddings as BLOBs, compute cosine similarity in application code.
+Murmur uses this approach — viable for <10k chunks with sub-10ms query latency.
 - **sqlite-vss**: SQLite extension adding FAISS-backed ANN. Adds ~5MB binary size.
 - **LanceDB**: embedded columnar store with built-in ANN (IVF-PQ). Rust-native, no server.
 - **usearch**: single-header C++ ANN library with Rust/Python bindings. HNSW index in <1MB of code.
@@ -49,7 +50,7 @@ Embedding models have a token limit (typically 512 tokens). Long documents must 
 - **Semantic**: split on paragraph or sentence boundaries, merge small segments to reach target size. Better retrieval quality.
 - **Recursive**: split by largest delimiter first (double newline → newline → sentence → word), recursing until chunks fit the token budget.
 
-AudioX uses ~384-word chunks (~512 tokens) split on segment boundaries to preserve semantic coherence.
+Murmur uses ~384-word chunks (~512 tokens) split on segment boundaries to preserve semantic coherence.
 
 ## Example
 

@@ -52,7 +52,7 @@ fn longest<'a>(left: &'a str, right: &'a str) -> &'a str {
 }
 
 fn main() {
-    let title = String::from("AudioX");
+    let title = String::from("Murmur");
     let borrowed = &title;
 
     let mut tags = vec![String::from("rust")];

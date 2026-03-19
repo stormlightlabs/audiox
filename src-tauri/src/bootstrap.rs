@@ -334,7 +334,7 @@ fn download_guidance(spec: &models::RuntimeBinarySpec) -> String {
 
 fn non_download_guidance(spec: &models::RuntimeBinarySpec) -> String {
     format!(
-        "{} is unavailable. Reinstall Audio X to restore bundled dependencies. For local development, run `bash setup.sh` and ensure '{}' is installed on PATH.",
+        "{} is unavailable. Reinstall Murmur to restore bundled dependencies. For local development, run `bash setup.sh` and ensure '{}' is installed on PATH.",
         spec.display_name, spec.executable_stem
     )
 }

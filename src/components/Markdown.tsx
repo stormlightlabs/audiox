@@ -4,7 +4,7 @@ import { createMemo, createResource, createSignal, For, Match, Show, Switch } fr
 
 const DEFAULT_MARKDOWN_THEME = "zenburn";
 
-const MARKDOWN_THEME_STORAGE_KEY = "audiox.markdown.theme";
+const MARKDOWN_THEME_STORAGE_KEY = "murmur.markdown.theme";
 
 type MarkdownRenderResult = { html: string; theme: string };
 

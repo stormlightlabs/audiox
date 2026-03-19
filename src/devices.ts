@@ -6,7 +6,7 @@ import {
   requestPermission,
 } from "tauri-plugin-audio-recorder-api";
 
-const AUDIO_INPUT_DEVICE_STORAGE_KEY = "audiox:recording:device-id";
+const AUDIO_INPUT_DEVICE_STORAGE_KEY = "murmur:recording:device-id";
 
 export type AudioInputDevice = { id: string; name: string; isDefault: boolean };
 

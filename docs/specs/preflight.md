@@ -10,7 +10,7 @@ On every launch the app shows a splash screen while running preflight checks. Th
 3. **Embedding model** — check that fastembed model files exist in `appdata/models/embed/` (warn if missing — auto-downloads on first use)
 4. **Ollama server** — `GET http://localhost:11434/api/tags`, timeout 3s (warn if unavailable — only needed for document creation)
 5. **Ollama models** — parse `/api/tags` response, confirm `gemma3:4b` is present (warn if missing — only needed for document creation)
-6. **Database** — open or create `appdata/db/audiox.db`, run migrations if schema version is stale
+6. **Database** — open or create `appdata/db/murmur.db`, run migrations if schema version is stale
 
 ## Status Reporting
 

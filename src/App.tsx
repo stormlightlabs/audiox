@@ -46,27 +46,27 @@ async function openFundingLink(url: string) {
 
 function windowTitleForPath(pathname: string): string {
   if (pathname === "/splash") {
-    return "Audio X - Preflight";
+    return "Murmur - Preflight";
   }
   if (pathname === "/setup") {
-    return "Audio X - Setup Wizard";
+    return "Murmur - Setup Wizard";
   }
   if (pathname === "/record") {
-    return "Audio X - Microphone Recording";
+    return "Murmur - Microphone Recording";
   }
   if (pathname === "/import") {
-    return "Audio X - Import";
+    return "Murmur - Import";
   }
   if (pathname === "/library") {
-    return "Audio X - Document Library";
+    return "Murmur - Document Library";
   }
   if (pathname.startsWith("/document")) {
-    return "Audio X - Document";
+    return "Murmur - Document";
   }
   if (pathname === "/settings") {
-    return "Audio X - Settings";
+    return "Murmur - Settings";
   }
-  return "Audio X";
+  return "Murmur";
 }
 
 function isTauriRuntime(): boolean {
@@ -82,7 +82,7 @@ function SideNavigation() {
       transition={{ duration: 0.22 }}
       class="flex h-full min-h-0 w-full flex-col gap-6 overflow-y-auto border-r border-overlay bg-elevation/90 p-5 pb-6 shadow-2xl shadow-surface/50 backdrop-blur md:w-72 md:self-stretch">
       <header class="space-y-2">
-        <p class="font-display text-2xl tracking-wide text-text">Audio X</p>
+        <p class="font-display text-2xl tracking-wide text-text">Murmur</p>
         <p class="text-xs tracking-[0.2em] text-subtext uppercase">Navigation</p>
       </header>
       <nav class="grid gap-2">
@@ -102,18 +102,18 @@ function SideNavigation() {
       <div class="space-y-3 border-t border-overlay/70 pt-4">
         <div>
           <p class="text-[11px] font-semibold tracking-[0.16em] text-subtext uppercase">Support this project</p>
-          <p class="mt-1 text-xs text-subtext">Audio X is free to use and funded by community support.</p>
+          <p class="mt-1 text-xs text-subtext">Murmur is free to use and funded by community support.</p>
         </div>
 
         <Accordion
           id="support-why-matters"
           title="Why support matters"
-          summary="How support keeps Audio X sustainable."
+          summary="How support keeps Murmur sustainable."
           class="rounded-lg border border-overlay/70 bg-surface/20"
           headerClass="px-3 py-2"
           contentClass="px-3 pb-3">
           <p class="text-xs leading-relaxed text-subtext">
-            Support keeps Audio X independent, privacy-first, open source, and steadily improving.
+            Support keeps Murmur independent, privacy-first, open source, and steadily improving.
           </p>
           <div class="mt-2 grid grid-cols-2 gap-2 text-[11px] text-subtext">
             <span class="rounded-md border border-overlay/60 bg-surface/20 px-2 py-1">Independent</span>
@@ -131,7 +131,7 @@ function SideNavigation() {
           headerClass="px-3 py-2"
           contentClass="px-3 pb-3">
           <ul class="list-disc space-y-1 pl-4 text-xs text-subtext">
-            <li>Star and share Audio X</li>
+            <li>Star and share Murmur</li>
             <li>Report bugs and request features</li>
             <li>Contribute code or docs</li>
           </ul>
@@ -216,7 +216,7 @@ function ShellLayout(props: ParentProps) {
       if (key === "f") {
         event.preventDefault();
         void navigate("/library");
-        globalThis.dispatchEvent(new CustomEvent("audiox:focus-library-search"));
+        globalThis.dispatchEvent(new CustomEvent("murmur:focus-library-search"));
         return;
       }
 

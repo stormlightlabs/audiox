@@ -438,8 +438,8 @@ pub const WHISPER_BINARY_SPEC: RuntimeBinarySpec = RuntimeBinarySpec {
     version_args: &["--version"],
     path_candidates: &["whisper-cli"],
     sidecar_candidates: &["binaries/whisper-cli", "whisper-cli"],
-    download_url_env: "AUDIOX_WHISPER_URL",
-    download_sha256_env: "AUDIOX_WHISPER_SHA256",
+    download_url_env: "MURMUR_WHISPER_URL",
+    download_sha256_env: "MURMUR_WHISPER_SHA256",
     allow_runtime_download: false,
 };
 
@@ -452,8 +452,8 @@ pub const FFMPEG_BINARY_SPEC: RuntimeBinarySpec = RuntimeBinarySpec {
     version_args: &["-version"],
     path_candidates: &["ffmpeg"],
     sidecar_candidates: &["binaries/ffmpeg", "ffmpeg"],
-    download_url_env: "AUDIOX_FFMPEG_URL",
-    download_sha256_env: "AUDIOX_FFMPEG_SHA256",
+    download_url_env: "MURMUR_FFMPEG_URL",
+    download_sha256_env: "MURMUR_FFMPEG_SHA256",
     allow_runtime_download: false,
 };
 
@@ -466,7 +466,7 @@ pub const YT_DLP_BINARY_SPEC: RuntimeBinarySpec = RuntimeBinarySpec {
     version_args: &["--version"],
     path_candidates: &["yt-dlp", "yt_dlp"],
     sidecar_candidates: &["binaries/yt-dlp", "yt-dlp"],
-    download_url_env: "AUDIOX_YTDLP_URL",
-    download_sha256_env: "AUDIOX_YTDLP_SHA256",
+    download_url_env: "MURMUR_YTDLP_URL",
+    download_sha256_env: "MURMUR_YTDLP_SHA256",
     allow_runtime_download: false,
 };

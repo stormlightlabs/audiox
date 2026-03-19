@@ -1,6 +1,6 @@
-# Audio X Technical Specification
+# Murmur Technical Specification
 
-This directory contains the modular technical specification for Audio X.
+This directory contains the modular technical specification for Murmur.
 
 ## Index
 

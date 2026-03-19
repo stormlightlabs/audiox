@@ -149,7 +149,7 @@ impl FileStore {
     }
 
     pub fn database_path_from_app_data(&self) -> PathBuf {
-        self.app_data_dir.join("db").join("audiox.db")
+        self.app_data_dir.join("db").join("murmur.db")
     }
 }
 
@@ -583,7 +583,7 @@ mod tests {
             .expect("system clock should be after unix epoch")
             .as_nanos();
 
-        std::env::temp_dir().join(format!("audiox-{label}-{now}"))
+        std::env::temp_dir().join(format!("murmur-{label}-{now}"))
     }
 
     #[test]

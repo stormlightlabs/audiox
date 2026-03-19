@@ -75,11 +75,11 @@ describe("Markdown", () => {
     );
     await waitFor(() => expect(select).toHaveValue("tokyo-night"));
     expect(await screen.findByText("tokyo-night")).toBeInTheDocument();
-    expect(globalThis.localStorage.getItem("audiox.markdown.theme")).toBe("tokyo-night");
+    expect(globalThis.localStorage.getItem("murmur.markdown.theme")).toBe("tokyo-night");
   });
 
   it("hydrates the initial theme from localStorage", async () => {
-    globalThis.localStorage.setItem("audiox.markdown.theme", "tokyo-night");
+    globalThis.localStorage.setItem("murmur.markdown.theme", "tokyo-night");
 
     invokeMock.mockImplementation((command: string, args?: { content?: string; theme?: string }) => {
       if (command === "list_markdown_themes") {
