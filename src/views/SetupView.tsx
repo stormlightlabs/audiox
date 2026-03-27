@@ -1,4 +1,6 @@
+import { StatusGlyph } from "$/components/StatusGlyph";
 import { normalizeError } from "$/errors";
+import { type SetupStatus, useAppContext } from "$/state/AppContext";
 import type { ProgressStatus } from "$/types";
 import {
   EMBEDDING_PROGRESS_EVENT,
@@ -6,7 +8,7 @@ import {
   OLLAMA_PROGRESS_EVENT,
   STEP_ORDER,
   WHISPER_PROGRESS_EVENT,
-} from "$/types/setup";
+} from "$/views/SetupView/lib";
 import type {
   EmbeddingProgressEvent,
   OllamaProgressEvent,
@@ -15,14 +17,13 @@ import type {
   StepKey,
   StepStatus,
   WhisperProgressEvent,
-} from "$/types/setup";
+} from "$/views/SetupView/lib";
 import { useNavigate } from "@solidjs/router";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import * as logger from "@tauri-apps/plugin-log";
-import { createSignal, For, Match, onCleanup, onMount, Show, Switch } from "solid-js";
+import { createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import { createStore } from "solid-js/store";
-import { type SetupStatus, useAppContext } from "../state/AppContext";
 import { ViewScaffold } from "./ViewScaffold";
 
 function modelRequirementMatches(candidate: string, required: string): boolean {
@@ -197,28 +198,6 @@ function statusClass(status: StepStatus): string {
       return "text-subtext";
     }
   }
-}
-
-function StatusGlyph(props: { status: StepStatus }) {
-  return (
-    <Switch>
-      <Match when={props.status === "pass"}>
-        <span class="text-accent">✓</span>
-      </Match>
-      <Match when={props.status === "running"}>
-        <span class="inline-block size-4 rounded-full border-2 border-accent/40 border-t-accent align-middle animate-spin" />
-      </Match>
-      <Match when={props.status === "fail"}>
-        <span class="text-text">✕</span>
-      </Match>
-      <Match when={props.status === "blocked"}>
-        <span class="text-subtext">⏸</span>
-      </Match>
-      <Match when={props.status === "pending"}>
-        <span class="text-subtext">•</span>
-      </Match>
-    </Switch>
-  );
 }
 
 function StepCard(props: { step: SetupStep }) {

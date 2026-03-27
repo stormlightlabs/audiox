@@ -1,10 +1,12 @@
 import { Accordion } from "$/components/Accordion";
+import { StatusGlyph } from "$/components/StatusGlyph";
 import { useAppContext } from "$/state/AppContext";
 import type { CheckDisplayStatus, PreflightCheck } from "$/types/preflight";
 import { PREFLIGHT_CHECK_ORDER } from "$/types/preflight";
 import { useNavigate } from "@solidjs/router";
-import { createEffect, For, Match, onCleanup, Show, Switch } from "solid-js";
+import { createEffect, For, onCleanup, Show } from "solid-js";
 import { Motion } from "solid-motionone";
+import type { StepStatus } from "./SetupView/lib";
 
 type CheckMeta = { key: PreflightCheck; title: string };
 
@@ -59,28 +61,6 @@ function statusLabel(status: CheckDisplayStatus, running: boolean): string {
       return "pending";
     }
   }
-}
-
-function StatusGlyph(props: { status: CheckDisplayStatus; running: boolean }) {
-  return (
-    <Switch>
-      <Match when={props.running}>
-        <span class="inline-block size-4 rounded-full border-2 border-accent/40 border-t-accent align-middle animate-spin" />
-      </Match>
-      <Match when={props.status === "pass"}>
-        <span class="text-accent">✓</span>
-      </Match>
-      <Match when={props.status === "warn"}>
-        <span class="text-subtext">!</span>
-      </Match>
-      <Match when={props.status === "fail"}>
-        <span class="text-text">✕</span>
-      </Match>
-      <Match when={props.status === "pending"}>
-        <span class="text-subtext">•</span>
-      </Match>
-    </Switch>
-  );
 }
 
 function GuidancePanel(props: { messages: string[] }) {
@@ -170,6 +150,13 @@ export function SplashView() {
             {(item, index) => {
               const checkState = () => state.checklist[item.key];
               const running = () => currentRunningIndex() === index();
+              const status = () => {
+                if (running()) {
+                  return "running" as StepStatus;
+                }
+
+                return checkState().status;
+              };
 
               return (
                 <Motion.div
@@ -179,7 +166,7 @@ export function SplashView() {
                   class="rounded-xl border border-overlay/75 bg-elevation/75 px-4 py-3">
                   <div class="flex items-center justify-between gap-3">
                     <div class="flex items-center gap-3">
-                      <StatusGlyph status={checkState().status} running={running()} />
+                      <StatusGlyph status={status()} />
                       <p class="text-sm font-semibold text-text">{item.title}</p>
                     </div>
                     <span

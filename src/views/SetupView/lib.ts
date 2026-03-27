@@ -8,7 +8,7 @@ export const GEMMA_REQUIREMENT = "gemma3";
 export const STEP_ORDER: StepKey[] = ["whisper_model", "embedding_model", "metadata_backend", "ollama_fallback"];
 
 export type StepKey = "whisper_model" | "embedding_model" | "metadata_backend" | "ollama_fallback";
-export type StepStatus = "pending" | "running" | "pass" | "fail" | "blocked";
+export type StepStatus = "pending" | "running" | "pass" | "fail" | "blocked" | "warn";
 export type SetupPhase = "checking" | "idle" | "running" | "failed" | "completed";
 
 export type SetupStep = {

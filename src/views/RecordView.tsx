@@ -1,3 +1,4 @@
+import { ProgressBar } from "$/components/ProgressBar";
 import { checkMicrophonePermission, requestMicrophonePermission, supportsMediaRecording } from "$/devices";
 import { normalizeError } from "$/errors";
 import type { ProgressStatus } from "$/types";
@@ -14,6 +15,7 @@ import {
   startRecording as startNativeRecording,
   stopRecording as stopNativeRecording,
 } from "tauri-plugin-audio-recorder-api";
+import { TranscriptSegment } from "./DocumentView/lib";
 import {
   IMPORT_CONVERSION_PROGRESS_EVENT,
   IMPORT_METADATA_PROGRESS_EVENT,
@@ -46,18 +48,8 @@ type ImportedDocument = {
   subtitleVttPath: string;
   durationSeconds: number;
   createdAt: string;
-  segments: Array<{ startMs: number; endMs: number; text: string }>;
+  segments: TranscriptSegment[];
 };
-
-function ProgressBar(props: { percent: number }) {
-  return (
-    <div class="h-2 overflow-hidden rounded-full border border-overlay bg-surface/50">
-      <div
-        class="h-full rounded-full bg-accent/75 transition-[width] duration-200"
-        style={{ width: `${Math.max(0, Math.min(100, props.percent))}%` }} />
-    </div>
-  );
-}
 
 function PipelineProgressCard(props: { title: string; status: ProgressStatus; message: string; percent: number }) {
   return (

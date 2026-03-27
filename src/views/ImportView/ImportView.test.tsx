@@ -1,7 +1,7 @@
+import { ImportView } from "$/views/ImportView";
 import { fireEvent, render, screen, waitFor } from "@solidjs/testing-library";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { ImportView } from "./ImportView";
 
 const { invokeMock, listenMock, openMock, readTextFileMock, navigateMock } = vi.hoisted(() => ({
   invokeMock: vi.fn(),

@@ -1,3 +1,4 @@
+import { ProgressBar } from "$/components/ProgressBar";
 import { normalizeError } from "$/errors";
 import type { ProgressStatus } from "$/types";
 import { useNavigate } from "@solidjs/router";
@@ -5,13 +6,20 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import { readTextFile } from "@tauri-apps/plugin-fs";
+import * as logger from "@tauri-apps/plugin-log";
 import { createSignal, onCleanup, onMount, Show } from "solid-js";
+import { TranscriptSegment } from "./DocumentView/lib";
+import { AudioHeader, NotesHeader } from "./ImportView/Headers";
+import {
+  IMPORT_CONVERSION_PROGRESS_EVENT,
+  IMPORT_METADATA_PROGRESS_EVENT,
+  IMPORT_TRANSCRIPTION_PROGRESS_EVENT,
+  snippet,
+  TEXT_EXTENSIONS,
+} from "./ImportView/lib";
+import type { NotePreview } from "./ImportView/lib";
+import { PasteNoteInput } from "./ImportView/PasteNoteInput";
 import { ViewScaffold } from "./ViewScaffold";
-
-const IMPORT_CONVERSION_PROGRESS_EVENT = "import://conversion-progress";
-const IMPORT_TRANSCRIPTION_PROGRESS_EVENT = "import://transcription-progress";
-const IMPORT_METADATA_PROGRESS_EVENT = "import://metadata-progress";
-const TEXT_EXTENSIONS = new Set(["txt", "md"]);
 
 type ImportMode = "audio" | "notes";
 
@@ -24,6 +32,7 @@ type ConversionProgress = {
 };
 
 type TranscriptionProgress = { status: ProgressStatus; message: string; percent: number };
+
 type MetadataProgress = { status: ProgressStatus; message: string; percent: number };
 
 type ImportedDocument = {
@@ -39,20 +48,8 @@ type ImportedDocument = {
   subtitleVttPath: string;
   durationSeconds: number;
   createdAt: string;
-  segments: Array<{ startMs: number; endMs: number; text: string }>;
+  segments: TranscriptSegment[];
 };
-
-type NotePreview = { sourcePath: string | null; sourceName: string; title: string; content: string };
-
-function ProgressBar(props: { percent: number }) {
-  return (
-    <div class="h-2 overflow-hidden rounded-full border border-overlay bg-surface/50">
-      <div
-        class="h-full rounded-full bg-accent/75 transition-[width] duration-200"
-        style={{ width: `${Math.max(0, Math.min(100, props.percent))}%` }} />
-    </div>
-  );
-}
 
 function extensionFromName(name: string): string | null {
   const match = /\.([^.]+)$/.exec(name.trim());
@@ -76,115 +73,6 @@ function titleFromFileName(fileName: string): string {
     return withoutExtension;
   }
   return "Imported note";
-}
-
-function snippet(content: string): string {
-  const trimmed = content.trim();
-  if (trimmed.length <= 500) {
-    return trimmed;
-  }
-  return `${trimmed.slice(0, 500)}...`;
-}
-function PasteNoteInput(
-  props: {
-    pasteTitle: string;
-    pasteContent: string;
-    isImporting: boolean;
-    preview: NotePreview | null;
-    importPastedText: () => void;
-    updatePasteTitle: (title: string) => void;
-    updatePasteContent: (content: string) => void;
-  },
-) {
-  const pasteTitle = () => props.pasteTitle;
-  const pasteContent = () => props.pasteContent;
-  const importPastedText = () => props.importPastedText;
-  const isImporting = () => props.isImporting;
-  const preview = () => props.preview;
-
-  return (
-    <Show when={!preview()}>
-      <section class="space-y-2 rounded-2xl border border-overlay bg-elevation/60 p-4">
-        <p class="text-sm font-semibold text-text">Paste note content</p>
-        <label class="grid gap-1 text-xs text-subtext">
-          Title (optional)
-          <input
-            type="text"
-            class="rounded-xl border border-overlay bg-elevation/70 px-3 py-2 text-sm text-text outline-none transition focus:border-accent/55"
-            value={pasteTitle()}
-            onInput={(event) => {
-              void props.updatePasteTitle(event.currentTarget.value);
-            }} />
-        </label>
-        <label class="grid gap-1 text-xs text-subtext">
-          Content
-          <textarea
-            rows={7}
-            class="rounded-xl border border-overlay bg-elevation/70 px-3 py-2 text-sm text-text outline-none transition focus:border-accent/55"
-            value={pasteContent()}
-            onInput={(event) => {
-              void props.updatePasteContent(event.currentTarget.value);
-            }} />
-        </label>
-        <div class="flex flex-wrap items-center justify-between gap-2">
-          <p class="text-xs text-subtext">Preview: {snippet(pasteContent()) || "(empty note)"}</p>
-          <button
-            type="button"
-            class="rounded-xl bg-accent px-3 py-1.5 text-xs font-semibold text-surface transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-60"
-            onClick={() => {
-              void importPastedText();
-            }}
-            disabled={isImporting()}>
-            {isImporting() ? "Processing..." : "Process pasted note"}
-          </button>
-        </div>
-      </section>
-    </Show>
-  );
-}
-
-function NotesHeader(props: { pickTextFile: () => void; isImporting: boolean }) {
-  const isImporting = () => props.isImporting;
-
-  return (
-    <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-      <div>
-        <p class="text-sm font-semibold text-text">Supported note formats</p>
-        <p class="text-xs text-subtext">.txt, .md</p>
-      </div>
-      <button
-        type="button"
-        class="rounded-xl bg-accent px-4 py-2 text-sm font-semibold text-surface transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-60"
-        onClick={() => {
-          void props.pickTextFile();
-        }}
-        disabled={isImporting()}>
-        Choose note file
-      </button>
-    </div>
-  );
-}
-
-function AudioHeader(props: { pickAudioFile: () => void; isImporting: boolean }) {
-  const isImporting = () => props.isImporting;
-
-  return (
-    <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-      <div>
-        <p class="text-sm font-semibold text-text">Supported formats</p>
-        <p class="text-xs text-subtext">mp3, m4a, wav, flac, ogg, opus, webm</p>
-      </div>
-      <button
-        type="button"
-        class="rounded-xl bg-accent px-4 py-2 text-sm font-semibold text-surface transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-60"
-        onClick={() => {
-          void props.pickAudioFile();
-        }}
-        disabled={isImporting()}>
-        {isImporting() ? "Processing..." : "Choose audio file"}
-      </button>
-    </div>
-  );
 }
 
 export function ImportView() {
@@ -357,8 +245,11 @@ export function ImportView() {
         unlistenMetadata = await listen<MetadataProgress>(IMPORT_METADATA_PROGRESS_EVENT, (event) => {
           setMetadataProgress(event.payload);
         });
-      } catch {
-        // Event channels are unavailable in plain browser contexts.
+      } catch (error) {
+        logger.debug(
+          "Event listeners are unavailable, progress updates will not work. This is expected if running in a browser context.",
+          { keyValues: { error: normalizeError(error) } },
+        );
       }
     })();
 
