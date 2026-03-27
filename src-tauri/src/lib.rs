@@ -1,3 +1,4 @@
+mod apple_intelligence;
 mod bootstrap;
 mod commands;
 mod embedding;
@@ -53,6 +54,7 @@ pub fn run() {
             commands::list_whisper_models,
             commands::delete_whisper_model,
             commands::check_ollama_connection,
+            commands::get_metadata_backend_status,
             commands::initialize_app,
             commands::preflight,
             commands::check_setup,

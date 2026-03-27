@@ -15,20 +15,29 @@ import { createStore } from "solid-js/store";
 import type { PreflightResult } from "../state/AppContext";
 import { ViewScaffold } from "./ViewScaffold";
 
-type AppSettings = { whisperModel: string; whisperLanguage: string; whisperThreads: number; ollamaEndpoint: string };
+type MetadataBackendMode = "auto" | "apple_intelligence" | "ollama";
+type ResolvedMetadataBackend = "apple_intelligence" | "ollama" | "unavailable";
+
+type AppSettings = {
+  whisperModel: string;
+  whisperLanguage: string;
+  whisperThreads: number;
+  metadataBackendMode: MetadataBackendMode;
+  ollamaEndpoint: string;
+};
 type WhisperModelInfo = { modelName: string; fileName: string; sizeBytes: number };
 type WhisperModelInventory = { selectedModel: string; installedModels: WhisperModelInfo[]; totalSizeBytes: number };
 
 type SettingsStore = {
   isBusy: boolean;
   isSavingSettings: boolean;
-  isCheckingOllama: boolean;
+  isCheckingMetadataBackend: boolean;
   isRunningPreflight: boolean;
   isDownloadingModel: boolean;
   deletingModelName: string | null;
   settings: AppSettings;
   modelInventory: WhisperModelInventory | null;
-  ollamaStatus: OllamaConnectionStatus | null;
+  metadataBackendStatus: MetadataBackendStatus | null;
   preflightResult: PreflightResult | null;
   info: string | null;
   error: string | null;
@@ -40,13 +49,23 @@ type SettingsStore = {
   hasPermission: boolean;
 };
 
-type OllamaConnectionStatus = {
-  endpoint: string;
-  reachable: boolean;
-  installedModels: string[];
-  missingModels: string[];
+type MetadataBackendStatus = {
+  mode: MetadataBackendMode;
+  resolvedBackend: ResolvedMetadataBackend;
+  appleIntelligenceAvailable: boolean;
+  appleIntelligenceReason: string | null;
+  ollamaEndpoint: string;
+  ollamaReachable: boolean;
+  installedOllamaModels: string[];
+  missingOllamaModels: string[];
   message: string;
 };
+
+const METADATA_BACKEND_OPTIONS: Array<{ value: MetadataBackendMode; label: string }> = [
+  { value: "auto", label: "Auto" },
+  { value: "apple_intelligence", label: "Apple Intelligence" },
+  { value: "ollama", label: "Ollama" },
+];
 
 type DeviceSelectorProps = {
   devices: AudioInputDevice[];
@@ -250,36 +269,62 @@ function WhisperThreadsInput(
   );
 }
 
-function OllamaEndpointInput(
-  props: { ollamaEndpoint: string; onOllamaEndpointChange: (ollamaEndpoint: string) => void },
+function MetadataBackendSelector(
+  props: {
+    metadataBackendMode: MetadataBackendMode;
+    options: Array<{ value: MetadataBackendMode; label: string }>;
+    onMetadataBackendModeChange: (metadataBackendMode: MetadataBackendMode) => void;
+  },
 ) {
-  const ollamaEndpoint = () => props.ollamaEndpoint;
   return (
     <label class="grid gap-2">
-      <span class="text-xs font-semibold tracking-[0.14em] text-subtext uppercase">Ollama endpoint</span>
-      <input
-        type="text"
+      <span class="text-xs font-semibold tracking-[0.14em] text-subtext uppercase">Metadata backend</span>
+      <select
         class="rounded-xl border border-overlay bg-surface/45 px-3 py-2 text-sm text-text focus:border-accent/60 focus:outline-hidden"
-        value={ollamaEndpoint()}
+        value={props.metadataBackendMode}
         onInput={(event) => {
-          const value = (event.currentTarget as HTMLInputElement).value;
-          props.onOllamaEndpointChange(value);
-        }} />
+          const value = (event.currentTarget as HTMLSelectElement).value as MetadataBackendMode;
+          props.onMetadataBackendModeChange(value);
+        }}>
+        <For each={props.options}>{(option) => <option value={option.value}>{option.label}</option>}</For>
+      </select>
     </label>
   );
 }
 
-function CheckOllamaButton(props: { isCheckingOllama: boolean; checkOllama: () => void }) {
+function OllamaEndpointInput(
+  props: { ollamaEndpoint: string; onOllamaEndpointChange: (ollamaEndpoint: string) => void; useOllama: boolean },
+) {
+  const useOllama = () => props.useOllama;
+  const ollamaEndpoint = () => props.ollamaEndpoint;
+  return (
+    <Show when={useOllama()}>
+      <label class="grid gap-2">
+        <span class="text-xs font-semibold tracking-[0.14em] text-subtext uppercase">Ollama endpoint</span>
+        <input
+          type="text"
+          class="rounded-xl border border-overlay bg-surface/45 px-3 py-2 text-sm text-text focus:border-accent/60 focus:outline-hidden"
+          value={ollamaEndpoint()}
+          onInput={(event) => {
+            const value = (event.currentTarget as HTMLInputElement).value;
+            props.onOllamaEndpointChange(value);
+          }} />
+      </label>
+    </Show>
+  );
+}
+
+function CheckMetadataBackendButton(props: { isCheckingMetadataBackend: boolean; checkMetadataBackend: () => void }) {
   return (
     <div class="flex flex-wrap items-center gap-2">
       <button
         type="button"
         class="rounded-xl border border-overlay px-3 py-1.5 text-xs font-semibold text-subtext transition hover:border-accent/35 hover:text-text disabled:opacity-60"
-        disabled={props.isCheckingOllama}
+        disabled={props.isCheckingMetadataBackend}
         onClick={() => {
-          void props.checkOllama();
+          void props.checkMetadataBackend();
         }}>
-        {props.isCheckingOllama ? "Checking Ollama..." : "Re-check Ollama connection"}
+        {props.isCheckingMetadataBackend ? "Checking metadata backends..." : "Re-check metadata backend"}
       </button>
     </div>
   );
@@ -343,10 +388,11 @@ function InstalledWhisperModels(
 
 export function SettingsView() {
   const isSupported = supportsMediaRecording();
+  const isMacOS = /mac/i.test(globalThis.navigator?.platform ?? "");
   const [state, setState] = createStore<SettingsStore>({
     isBusy: false,
     isSavingSettings: false,
-    isCheckingOllama: false,
+    isCheckingMetadataBackend: false,
     isRunningPreflight: false,
     isDownloadingModel: false,
     deletingModelName: null,
@@ -354,10 +400,11 @@ export function SettingsView() {
       whisperModel: "base.en",
       whisperLanguage: "auto",
       whisperThreads: 4,
+      metadataBackendMode: isMacOS ? "auto" : "ollama",
       ollamaEndpoint: "http://localhost:11434",
     },
     modelInventory: null,
-    ollamaStatus: null,
+    metadataBackendStatus: null,
     preflightResult: null,
     settingsError: null,
     settingsInfo: null,
@@ -371,6 +418,12 @@ export function SettingsView() {
 
   const selectedModelInstalled = createMemo(() =>
     state.modelInventory?.installedModels.some((model) => model.modelName === state.settings.whisperModel) ?? false
+  );
+  const metadataBackendOptions = createMemo(() =>
+    isMacOS ? METADATA_BACKEND_OPTIONS : METADATA_BACKEND_OPTIONS.filter((option) => option.value === "ollama")
+  );
+  const metadataBackendMayUseOllama = createMemo(() =>
+    !isMacOS || state.settings.metadataBackendMode === "auto" || state.settings.metadataBackendMode === "ollama"
   );
   const preflightSummary = createMemo(() => {
     const result = state.preflightResult;
@@ -449,6 +502,8 @@ export function SettingsView() {
       setState("settings", nextSettings);
       const inventory = await invoke<WhisperModelInventory>("list_whisper_models");
       setState("modelInventory", inventory);
+      const backendStatus = await invoke<MetadataBackendStatus>("get_metadata_backend_status");
+      setState("metadataBackendStatus", backendStatus);
     } catch (refreshError) {
       setState("settingsError", normalizeError(refreshError));
     } finally {
@@ -465,12 +520,15 @@ export function SettingsView() {
         whisperModel: state.settings.whisperModel,
         whisperLanguage: state.settings.whisperLanguage,
         whisperThreads: state.settings.whisperThreads,
+        metadataBackendMode: state.settings.metadataBackendMode,
         ollamaEndpoint: state.settings.ollamaEndpoint,
       });
       setState("settings", saved);
       setState("settingsInfo", "Saved settings.");
       const inventory = await invoke<WhisperModelInventory>("list_whisper_models");
       setState("modelInventory", inventory);
+      const backendStatus = await invoke<MetadataBackendStatus>("get_metadata_backend_status");
+      setState("metadataBackendStatus", backendStatus);
     } catch (saveError) {
       setState("settingsError", normalizeError(saveError));
     } finally {
@@ -510,17 +568,17 @@ export function SettingsView() {
     }
   };
 
-  const checkOllama = async () => {
-    setState("isCheckingOllama", true);
+  const checkMetadataBackend = async () => {
+    setState("isCheckingMetadataBackend", true);
     setState("settingsError", null);
     try {
-      const status = await invoke<OllamaConnectionStatus>("check_ollama_connection");
-      setState("ollamaStatus", status);
-    } catch (ollamaError) {
-      setState("settingsError", normalizeError(ollamaError));
-      setState("ollamaStatus", null);
+      const status = await invoke<MetadataBackendStatus>("get_metadata_backend_status");
+      setState("metadataBackendStatus", status);
+    } catch (statusError) {
+      setState("settingsError", normalizeError(statusError));
+      setState("metadataBackendStatus", null);
     } finally {
-      setState("isCheckingOllama", false);
+      setState("isCheckingMetadataBackend", false);
     }
   };
 
@@ -565,6 +623,10 @@ export function SettingsView() {
     setState("settings", "whisperThreads", whisperThreads);
   };
 
+  const onMetadataBackendModeChange = (metadataBackendMode: MetadataBackendMode) => {
+    setState("settings", "metadataBackendMode", metadataBackendMode);
+  };
+
   const onOllamaEndpointChange = (ollamaEndpoint: string) => {
     setState("settings", "ollamaEndpoint", ollamaEndpoint);
   };
@@ -592,7 +654,7 @@ export function SettingsView() {
       <ViewScaffold
         eyebrow="Settings"
         title="System configuration"
-        description="Manage whisper/Ollama defaults, model downloads, and recording device preferences.">
+        description="Manage local transcription, metadata backends, model downloads, and recording device preferences.">
         <section class="space-y-5 rounded-3xl border border-overlay bg-elevation/85 p-6">
           <div class="grid gap-3 rounded-2xl border border-overlay bg-surface/35 p-4 sm:grid-cols-2">
             <WhisperModelSelector
@@ -607,7 +669,13 @@ export function SettingsView() {
               whisperThreads={state.settings.whisperThreads}
               onWhisperThreadsChange={onWhisperThreadsChange} />
 
+            <MetadataBackendSelector
+              metadataBackendMode={state.settings.metadataBackendMode}
+              options={metadataBackendOptions()}
+              onMetadataBackendModeChange={onMetadataBackendModeChange} />
+
             <OllamaEndpointInput
+              useOllama={metadataBackendMayUseOllama()}
               ollamaEndpoint={state.settings.ollamaEndpoint}
               onOllamaEndpointChange={onOllamaEndpointChange} />
 
@@ -631,18 +699,31 @@ export function SettingsView() {
             selectedModelInstalled={selectedModelInstalled()} />
 
           <section class="space-y-3 rounded-2xl border border-overlay bg-surface/30 p-4">
-            <CheckOllamaButton isCheckingOllama={state.isCheckingOllama} checkOllama={checkOllama} />
-            <Show when={state.ollamaStatus}>
+            <CheckMetadataBackendButton
+              isCheckingMetadataBackend={state.isCheckingMetadataBackend}
+              checkMetadataBackend={checkMetadataBackend} />
+            <Show when={state.metadataBackendStatus}>
               {(status) => (
                 <div class="rounded-xl border border-overlay bg-surface/35 p-3 text-xs text-subtext">
-                  <p class="text-sm font-semibold text-text">{status().reachable ? "Reachable" : "Unavailable"}</p>
-                  <p class="mt-1">Endpoint: {status().endpoint}</p>
+                  <p class="text-sm font-semibold text-text">Resolved backend: {status().resolvedBackend}</p>
+                  <p class="mt-1">Selected mode: {status().mode}</p>
                   <p class="mt-1">{status().message}</p>
-                  <Show when={status().installedModels.length > 0}>
-                    <p class="mt-1">Installed: {status().installedModels.join(", ")}</p>
+                  <Show when={isMacOS}>
+                    <p class="mt-1">
+                      Apple Intelligence: {status().appleIntelligenceAvailable ? "available" : "unavailable"}
+                      {status().appleIntelligenceReason ? ` (${status().appleIntelligenceReason})` : ""}
+                    </p>
                   </Show>
-                  <Show when={status().missingModels.length > 0}>
-                    <p class="mt-1">Missing: {status().missingModels.join(", ")}</p>
+                  <Show when={metadataBackendMayUseOllama()}>
+                    <p class="mt-1">
+                      Ollama: {status().ollamaReachable ? "reachable" : "unreachable"} at {status().ollamaEndpoint}
+                    </p>
+                  </Show>
+                  <Show when={status().installedOllamaModels.length > 0}>
+                    <p class="mt-1">Installed Ollama models: {status().installedOllamaModels.join(", ")}</p>
+                  </Show>
+                  <Show when={status().missingOllamaModels.length > 0}>
+                    <p class="mt-1">Missing Ollama models: {status().missingOllamaModels.join(", ")}</p>
                   </Show>
                 </div>
               )}

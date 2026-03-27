@@ -1,5 +1,21 @@
 import { normalizeError } from "$/errors";
 import type { ProgressStatus } from "$/types";
+import {
+  EMBEDDING_PROGRESS_EVENT,
+  GEMMA_REQUIREMENT,
+  OLLAMA_PROGRESS_EVENT,
+  STEP_ORDER,
+  WHISPER_PROGRESS_EVENT,
+} from "$/types/setup";
+import type {
+  EmbeddingProgressEvent,
+  OllamaProgressEvent,
+  SetupPhase,
+  SetupStep,
+  StepKey,
+  StepStatus,
+  WhisperProgressEvent,
+} from "$/types/setup";
 import { useNavigate } from "@solidjs/router";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
@@ -8,46 +24,6 @@ import { createSignal, For, Match, onCleanup, onMount, Show, Switch } from "soli
 import { createStore } from "solid-js/store";
 import { type SetupStatus, useAppContext } from "../state/AppContext";
 import { ViewScaffold } from "./ViewScaffold";
-
-const WHISPER_PROGRESS_EVENT = "setup://whisper-progress";
-const EMBEDDING_PROGRESS_EVENT = "setup://embedding-progress";
-const OLLAMA_PROGRESS_EVENT = "setup://ollama-progress";
-const GEMMA_REQUIREMENT = "gemma3";
-
-type StepKey = "whisper_model" | "embedding_model" | "ollama_server" | "gemma";
-type StepStatus = "pending" | "running" | "pass" | "fail" | "blocked";
-type SetupPhase = "checking" | "idle" | "running" | "failed" | "completed";
-
-type SetupStep = {
-  key: StepKey;
-  title: string;
-  description: string;
-  status: StepStatus;
-  message: string;
-  progress: number;
-};
-
-type WhisperProgressEvent = {
-  modelName: string;
-  status: ProgressStatus;
-  message: string;
-  downloadedBytes: number;
-  totalBytes: number | null;
-  percent: number;
-};
-
-type OllamaProgressEvent = {
-  modelName: string;
-  status: ProgressStatus;
-  message: string;
-  completed: number;
-  total: number;
-  percent: number;
-};
-
-type EmbeddingProgressEvent = { status: ProgressStatus; message: string; percent: number };
-
-const STEP_ORDER: StepKey[] = ["whisper_model", "embedding_model", "ollama_server", "gemma"];
 
 function modelRequirementMatches(candidate: string, required: string): boolean {
   const left = candidate.trim().toLowerCase();
@@ -72,7 +48,7 @@ function hasModel(status: SetupStatus, model: string): boolean {
 
 function modelToStep(modelName: string): StepKey | null {
   if (modelName.startsWith("gemma3")) {
-    return "gemma";
+    return "metadata_backend";
   }
   return null;
 }
@@ -87,9 +63,53 @@ function progressEventStatus(status: ProgressStatus): StepStatus {
   return "running";
 }
 
+function getMetadataStatus(status: SetupStatus): StepStatus {
+  if (status.resolved_metadata_backend === "apple_intelligence") {
+    return "pass";
+  }
+
+  if (status.ollama_reachable) {
+    return hasModel(status, GEMMA_REQUIREMENT) ? "pass" : "pending";
+  }
+
+  const isMacFlow = status.metadata_backend_mode !== "ollama" || status.apple_intelligence_available
+    || status.apple_intelligence_reason !== null;
+  return isMacFlow ? "blocked" : "fail";
+}
+
+function getMetadataMessage(status: SetupStatus): string {
+  if (status.resolved_metadata_backend === "apple_intelligence") {
+    return "Apple Intelligence is available for metadata generation.";
+  }
+
+  if (status.ollama_reachable && hasModel(status, GEMMA_REQUIREMENT)) {
+    return "Ollama metadata model is installed.";
+  } else if (status.ollama_reachable) {
+    return "Ollama is reachable and the metadata model will be pulled.";
+  }
+
+  const isMacFlow = status.metadata_backend_mode !== "ollama" || status.apple_intelligence_available
+    || status.apple_intelligence_reason !== null;
+
+  if (isMacFlow) {
+    if (status.apple_intelligence_available) {
+      return "Apple Intelligence is available. Ollama remains optional as a fallback.";
+    }
+    if (status.apple_intelligence_reason) {
+      return `Apple Intelligence is unavailable: ${status.apple_intelligence_reason}.`;
+    }
+    return "Apple Intelligence is unavailable.";
+  }
+
+  return "Ollama is not reachable yet.";
+}
+
 function buildStepMap(status: SetupStatus): Record<StepKey, SetupStep> {
-  const ollamaServerStatus: StepStatus = status.ollama_server_ready ? "pass" : "fail";
-  const modelStepStatus = status.ollama_server_ready ? "pending" : "blocked";
+  const isMacFlow = status.metadata_backend_mode !== "ollama" || status.apple_intelligence_available
+    || status.apple_intelligence_reason !== null;
+  const ollamaServerStatus: StepStatus = status.ollama_reachable ? "pass" : (isMacFlow ? "blocked" : "fail");
+  const metadataStatus: StepStatus = getMetadataStatus(status);
+  const metadataMessage = getMetadataMessage(status);
 
   return {
     whisper_model: {
@@ -112,25 +132,29 @@ function buildStepMap(status: SetupStatus): Record<StepKey, SetupStep> {
         : "Model not found. Setup will download it.",
       progress: status.embedding_model_ready ? 100 : 0,
     },
-    ollama_server: {
-      key: "ollama_server",
-      title: "Ollama server",
-      description: "Optional for metadata generation at http://localhost:11434.",
-      status: ollamaServerStatus,
-      message: status.ollama_server_ready
-        ? "Ollama server is reachable."
-        : "Ollama is not reachable. Search still works, but title/summary/tag generation requires Ollama.",
-      progress: status.ollama_server_ready ? 100 : 0,
+    metadata_backend: {
+      key: "metadata_backend",
+      title: isMacFlow ? "Metadata backend" : "Ollama metadata model",
+      description: isMacFlow
+        ? "Use Apple Intelligence when available and Ollama as the fallback backend."
+        : "Use the gemma3 family through Ollama for title, summary, and tag generation.",
+      status: metadataStatus,
+      message: metadataMessage,
+      progress: metadataStatus === "pass" ? 100 : 0,
     },
-    gemma: {
-      key: "gemma",
-      title: "gemma3 family",
-      description: "Optional, but required for title/summary/tag generation.",
-      status: status.ollama_server_ready ? (hasModel(status, GEMMA_REQUIREMENT) ? "pass" : modelStepStatus) : "blocked",
-      message: status.ollama_server_ready
-        ? (hasModel(status, GEMMA_REQUIREMENT) ? "Model is installed." : "Model is missing and will be pulled.")
-        : "Waiting for Ollama server.",
-      progress: status.ollama_server_ready && hasModel(status, GEMMA_REQUIREMENT) ? 100 : 0,
+    ollama_fallback: {
+      key: "ollama_fallback",
+      title: isMacFlow ? "Ollama fallback" : "Ollama server",
+      description: isMacFlow
+        ? "Optional on Mac when Apple Intelligence is available; used as the fallback backend otherwise."
+        : "Required for metadata generation at http://localhost:11434.",
+      status: ollamaServerStatus,
+      message: status.ollama_reachable
+        ? "Ollama server is reachable."
+        : (isMacFlow
+          ? "Ollama fallback is optional until Apple Intelligence is unavailable or you switch backends."
+          : "Ollama is not reachable. Search still works, but metadata generation requires Ollama."),
+      progress: status.ollama_reachable ? 100 : 0,
     },
   };
 }
@@ -257,18 +281,18 @@ export function SetupView() {
       message: "Waiting for setup check...",
       progress: 0,
     },
-    ollama_server: {
-      key: "ollama_server",
-      title: "Ollama server",
-      description: "Optional for metadata generation at http://localhost:11434.",
+    metadata_backend: {
+      key: "metadata_backend",
+      title: "Metadata backend",
+      description: "Preparing the preferred metadata backend.",
       status: "pending",
       message: "Waiting for setup check...",
       progress: 0,
     },
-    gemma: {
-      key: "gemma",
-      title: "gemma3 family",
-      description: "Optional, but required for title/summary/tag generation.",
+    ollama_fallback: {
+      key: "ollama_fallback",
+      title: "Ollama fallback",
+      description: "Preparing Ollama fallback availability.",
       status: "pending",
       message: "Waiting for setup check...",
       progress: 0,
@@ -349,7 +373,7 @@ export function SetupView() {
         return;
       }
 
-      if (afterEmbedding.ollama_server_ready) {
+      if (afterEmbedding.resolved_metadata_backend !== "apple_intelligence" && afterEmbedding.ollama_reachable) {
         for (const model of afterEmbedding.missing_ollama_models) {
           const stepKey = modelToStep(model);
           if (stepKey) {

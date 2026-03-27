@@ -60,6 +60,11 @@ const setupPreflight = {
 const setupStatus = {
   whisper_model_ready: false,
   embedding_model_ready: false,
+  metadata_backend_mode: "auto",
+  resolved_metadata_backend: "unavailable",
+  apple_intelligence_available: false,
+  apple_intelligence_reason: "device_not_eligible",
+  ollama_reachable: false,
   ollama_server_ready: false,
   missing_ollama_models: ["gemma3"],
   setup_completed: false,

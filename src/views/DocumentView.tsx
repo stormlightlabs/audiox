@@ -1,17 +1,19 @@
+import { Markdown } from "$/components/Markdown";
 import { normalizeError } from "$/errors";
-import { formatDate, formatDuration, formatTimestamp } from "$/format-utils";
+import { formatDate, formatDuration } from "$/format-utils";
 import type { ProgressStatus } from "$/types";
 import { A, useParams, useSearchParams } from "@solidjs/router";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import * as logger from "@tauri-apps/plugin-log";
 import { createEffect, createSignal, For, onCleanup, onMount, Show } from "solid-js";
-import { Markdown } from "../components/Markdown";
+import { DocumentSegments } from "./DocumentView/DocumentSegments";
+import { segmentDomKey, TranscriptSegment } from "./DocumentView/lib";
+import { LoadingSkeleton } from "./DocumentView/LoadingSkeleton";
 import { ViewScaffold } from "./ViewScaffold";
 
 const DOCUMENT_METADATA_PROGRESS_EVENT = "document://metadata-progress";
 
-type TranscriptSegment = { startMs: number; endMs: number; text: string };
 type MetadataProgress = { status: ProgressStatus; message: string; percent: number };
 
 type DocumentDetail = {
@@ -59,10 +61,6 @@ function tagsEqual(left: string[], right: string[]): boolean {
   return true;
 }
 
-function segmentDomKey(segment: TranscriptSegment): string {
-  return `${segment.startMs}-${segment.endMs}`;
-}
-
 function segmentForTarget(segments: TranscriptSegment[], targetMs: number): TranscriptSegment | null {
   if (segments.length === 0) {
     return null;
@@ -106,23 +104,6 @@ function isMarkdownSource(document: DocumentDetail): boolean {
   return document.sourceUri.trim().toLowerCase().endsWith(".md");
 }
 
-function LoadingSkeleton() {
-  return (
-    <div class="grid gap-3" aria-hidden="true">
-      <div class="animate-pulse rounded-2xl border border-overlay bg-surface/35 p-4">
-        <div class="h-4 w-1/4 rounded bg-overlay/70" />
-        <div class="mt-3 h-3 w-10/12 rounded bg-overlay/60" />
-        <div class="mt-2 h-3 w-8/12 rounded bg-overlay/60" />
-      </div>
-      <div class="animate-pulse rounded-2xl border border-overlay bg-surface/35 p-4">
-        <div class="h-3 w-1/3 rounded bg-overlay/60" />
-        <div class="mt-2 h-3 w-11/12 rounded bg-overlay/60" />
-        <div class="mt-2 h-3 w-9/12 rounded bg-overlay/60" />
-      </div>
-    </div>
-  );
-}
-
 function ProgressBar(props: { percent: number }) {
   return (
     <div class="h-2 overflow-hidden rounded-full border border-overlay bg-surface/50">
@@ -130,45 +111,6 @@ function ProgressBar(props: { percent: number }) {
         class="h-full rounded-full bg-accent/75 transition-[width] duration-200"
         style={{ width: `${Math.max(0, Math.min(100, props.percent))}%` }} />
     </div>
-  );
-}
-
-function DocumentSegments(
-  props: {
-    segments: TranscriptSegment[];
-    transcript: string;
-    segmentElements: Map<string, HTMLElement>;
-    focusedSegmentKey: string | null;
-  },
-) {
-  const segmentElements = () => props.segmentElements;
-  const focusedSegmentKey = () => props.focusedSegmentKey;
-  const segments = () => props.segments;
-  const transcript = () => props.transcript;
-
-  return (
-    <Show when={segments().length > 0} fallback={<p class="text-sm text-subtext">{transcript()}</p>}>
-      <div class="grid gap-2">
-        <For each={segments()}>
-          {(segment) => {
-            const key = segmentDomKey(segment);
-            return (
-              <div
-                ref={(element) => {
-                  segmentElements().set(key, element);
-                }}
-                class="rounded-xl border border-overlay/80 bg-elevation/70 px-3 py-2 transition"
-                classList={{ "!border-accent/70 ring-2 ring-accent/40": focusedSegmentKey() === key }}>
-                <p class="text-[11px] font-semibold tracking-[0.14em] text-subtext uppercase">
-                  {formatTimestamp(segment.startMs)} - {formatTimestamp(segment.endMs)}
-                </p>
-                <p class="mt-1 text-sm text-text">{segment.text}</p>
-              </div>
-            );
-          }}
-        </For>
-      </div>
-    </Show>
   );
 }
 
@@ -344,14 +286,14 @@ export function DocumentView() {
     }
   };
 
-  const runGemmaEnrichment = async () => {
+  const runMetadataEnrichment = async () => {
     const currentDocument = document();
     if (!currentDocument) {
       return;
     }
 
     if (hasUnsavedChanges()) {
-      setEnrichmentError("Save title/tags changes before running Gemma enrichment.");
+      setEnrichmentError("Save title/tags changes before running metadata enrichment.");
       return;
     }
 
@@ -367,7 +309,7 @@ export function DocumentView() {
         if (current) {
           return current;
         }
-        return { status: "completed", message: "Gemma enrichment complete.", percent: 100 };
+        return { status: "completed", message: "Metadata enrichment complete.", percent: 100 };
       });
     } catch (enrichmentFailure) {
       setEnrichmentError(normalizeError(enrichmentFailure));
@@ -490,14 +432,14 @@ export function DocumentView() {
                     type="button"
                     class="rounded-xl border border-overlay px-3 py-1.5 text-xs font-semibold text-subtext transition hover:border-accent/35 hover:text-text disabled:cursor-not-allowed disabled:opacity-60"
                     onClick={() => {
-                      void runGemmaEnrichment();
+                      void runMetadataEnrichment();
                     }}
                     disabled={isSaving() || isEnriching() || hasUnsavedChanges()}>
                     {isEnriching()
-                      ? "Running Gemma..."
+                      ? "Running metadata..."
                       : (currentDocument().summary?.trim() || currentDocument().tags.length > 0
-                        ? "Re-run Gemma enrichment"
-                        : "Run Gemma enrichment")}
+                        ? "Re-run metadata enrichment"
+                        : "Run metadata enrichment")}
                   </button>
 
                   <Show when={saveMessage()}>{(message) => <span class="text-xs text-subtext">{message()}</span>}</Show>
@@ -507,7 +449,7 @@ export function DocumentView() {
                   {(progress) => (
                     <article class="space-y-2 rounded-2xl border border-overlay bg-surface/45 p-4">
                       <div class="flex items-center justify-between gap-3">
-                        <p class="text-sm font-semibold text-text">gemma enrichment + embeddings</p>
+                        <p class="text-sm font-semibold text-text">metadata enrichment + embeddings</p>
                         <span class="text-xs font-semibold tracking-[0.16em] text-subtext uppercase">
                           {progress().status}
                         </span>

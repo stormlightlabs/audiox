@@ -1,13 +1,12 @@
 import { checkMicrophonePermission, requestMicrophonePermission, supportsMediaRecording } from "$/devices";
 import { normalizeError } from "$/errors";
-import { formatElapsed } from "$/format-utils";
 import type { ProgressStatus } from "$/types";
 import { useNavigate } from "@solidjs/router";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { appDataDir, join } from "@tauri-apps/api/path";
+import * as logger from "@tauri-apps/plugin-log";
 import { createSignal, onCleanup, onMount, Show } from "solid-js";
-import { Motion } from "solid-motionone";
 import {
   getStatus,
   pauseRecording as pauseNativeRecording,
@@ -15,11 +14,14 @@ import {
   startRecording as startNativeRecording,
   stopRecording as stopNativeRecording,
 } from "tauri-plugin-audio-recorder-api";
+import {
+  IMPORT_CONVERSION_PROGRESS_EVENT,
+  IMPORT_METADATA_PROGRESS_EVENT,
+  IMPORT_TRANSCRIPTION_PROGRESS_EVENT,
+  type RecordingPhase,
+} from "./RecordView/lib";
+import { RecorderControls } from "./RecordView/RecorderControls";
 import { ViewScaffold } from "./ViewScaffold";
-
-const IMPORT_CONVERSION_PROGRESS_EVENT = "import://conversion-progress";
-const IMPORT_TRANSCRIPTION_PROGRESS_EVENT = "import://transcription-progress";
-const IMPORT_METADATA_PROGRESS_EVENT = "import://metadata-progress";
 
 type ConversionProgress = {
   status: ProgressStatus;
@@ -30,6 +32,7 @@ type ConversionProgress = {
 };
 
 type TranscriptionProgress = { status: ProgressStatus; message: string; percent: number };
+
 type MetadataProgress = { status: ProgressStatus; message: string; percent: number };
 
 type ImportedDocument = {
@@ -46,86 +49,12 @@ type ImportedDocument = {
   segments: Array<{ startMs: number; endMs: number; text: string }>;
 };
 
-type RecordingPhase = "idle" | "recording" | "paused" | "processing";
-
 function ProgressBar(props: { percent: number }) {
   return (
     <div class="h-2 overflow-hidden rounded-full border border-overlay bg-surface/50">
       <div
         class="h-full rounded-full bg-accent/75 transition-[width] duration-200"
         style={{ width: `${Math.max(0, Math.min(100, props.percent))}%` }} />
-    </div>
-  );
-}
-
-type RecorderControlsProps = {
-  phase: RecordingPhase;
-  elapsedMs: number;
-  onStart: () => void;
-  onPause: () => void;
-  onResume: () => void;
-  onStop: () => void;
-  setCanvasRef: (element: HTMLCanvasElement) => void;
-};
-
-function RecorderControls(props: RecorderControlsProps) {
-  return (
-    <div class="grid gap-3 rounded-2xl border border-overlay bg-surface/35 p-4">
-      <div class="flex flex-wrap items-center justify-between gap-3">
-        <div class="flex items-center gap-3">
-          {props.phase === "recording" && (
-            <Motion.div
-              class="h-3 w-3 rounded-full bg-red-400"
-              animate={{ scale: [1, 1.5, 1], opacity: [1, 0.45, 1] }}
-              transition={{ duration: 1, repeat: Number.POSITIVE_INFINITY }} />
-          )}
-          <p class="text-lg font-semibold text-text">{formatElapsed(props.elapsedMs)}</p>
-          <p class="text-xs font-semibold tracking-[0.16em] text-subtext uppercase">{props.phase}</p>
-        </div>
-        <p class="text-xs text-subtext">Native recorder plugin active (16kHz mono WAV).</p>
-      </div>
-
-      <canvas
-        ref={(element) => {
-          props.setCanvasRef(element);
-        }}
-        class="h-24 w-full rounded-xl border border-overlay bg-[#0a101e]"
-        width="600"
-        height="120" />
-
-      <div class="flex flex-wrap items-center gap-2">
-        <button
-          type="button"
-          class="rounded-xl bg-accent px-4 py-2 text-sm font-semibold text-surface transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-60"
-          onClick={() => props.onStart()}
-          disabled={props.phase !== "idle"}>
-          Start recording
-        </button>
-
-        <button
-          type="button"
-          class="rounded-xl border border-overlay px-4 py-2 text-sm font-semibold text-text transition hover:border-accent/35 disabled:cursor-not-allowed disabled:opacity-60"
-          onClick={() => props.onPause()}
-          disabled={props.phase !== "recording"}>
-          Pause
-        </button>
-
-        <button
-          type="button"
-          class="rounded-xl border border-overlay px-4 py-2 text-sm font-semibold text-text transition hover:border-accent/35 disabled:cursor-not-allowed disabled:opacity-60"
-          onClick={() => props.onResume()}
-          disabled={props.phase !== "paused"}>
-          Resume
-        </button>
-
-        <button
-          type="button"
-          class="rounded-xl border border-red-400/70 bg-red-500/10 px-4 py-2 text-sm font-semibold text-red-200 transition hover:border-red-300 disabled:cursor-not-allowed disabled:opacity-60"
-          onClick={() => props.onStop()}
-          disabled={props.phase !== "recording" && props.phase !== "paused"}>
-          Stop
-        </button>
-      </div>
     </div>
   );
 }
@@ -286,8 +215,9 @@ export function RecordView() {
     try {
       const status = await getStatus();
       setElapsedMs(status.durationMs);
-    } catch {
-      // Ignore transient status polling failures.
+    } catch (err) {
+      const error = normalizeError(err);
+      logger.debug("Failed to poll recorder status", { keyValues: { error } });
     }
   };
 
@@ -426,8 +356,9 @@ export function RecordView() {
         unlistenMetadata = await listen<MetadataProgress>(IMPORT_METADATA_PROGRESS_EVENT, (event) => {
           setMetadataProgress(event.payload);
         });
-      } catch {
-        // Event channels are unavailable in plain browser contexts.
+      } catch (err) {
+        const error = normalizeError(err);
+        logger.debug("Failed to set up event listeners for recording progress updates", { keyValues: { error } });
       }
     })();
   });
@@ -452,8 +383,9 @@ export function RecordView() {
         if (status.state !== "idle") {
           await stopNativeRecording();
         }
-      } catch {
-        // Ignore cleanup errors.
+      } catch (err) {
+        const error = normalizeError(err);
+        logger.debug("Failed to stop native recording during cleanup", { keyValues: { error } });
       }
     })();
   });
@@ -499,7 +431,7 @@ export function RecordView() {
 
           {phase() === "processing" && (
             <p class="rounded-xl border border-overlay bg-surface/35 p-3 text-sm text-subtext">
-              Processing recording with ffmpeg, whisper, and Gemma enrichment.
+              Processing recording with ffmpeg, whisper, and metadata enrichment.
             </p>
           )}
           <Show when={conversionProgress()}>
@@ -523,7 +455,7 @@ export function RecordView() {
           <Show when={metadataProgress()}>
             {(progress) => (
               <PipelineProgressCard
-                title="gemma enrichment + embeddings"
+                title="metadata enrichment + embeddings"
                 status={progress().status}
                 message={progress().message}
                 percent={progress().percent} />

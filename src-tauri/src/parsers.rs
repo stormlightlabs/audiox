@@ -1,6 +1,6 @@
 //! Parsing Utilities
 
-use crate::models::{OllamaModel, TranscriptSegment};
+use crate::models::{MetadataBackendMode, OllamaModel, TranscriptSegment};
 use crate::models::{
     ALLOWED_IMPORT_EXTENSIONS, ALLOWED_TEXT_IMPORT_EXTENSIONS, REQUIRED_OLLAMA_MODELS, WHISPER_LANGUAGE_AUTO,
 };
@@ -142,6 +142,10 @@ pub fn validate_whisper_language(language: &str) -> Result<String, String> {
     }
 
     Ok(trimmed)
+}
+
+pub fn validate_metadata_backend_mode(mode: &str) -> Result<MetadataBackendMode, String> {
+    mode.parse()
 }
 
 pub fn normalize_ollama_endpoint(endpoint: &str) -> Result<String, String> {

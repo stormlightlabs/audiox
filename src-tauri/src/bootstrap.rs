@@ -1,5 +1,6 @@
 //! Setup and Application Bootstrapping
 
+use crate::apple_intelligence;
 use crate::models;
 use crate::parsers::{
     calculate_percent, is_valid_sha256, missing_required_ollama_models, normalize_ollama_endpoint, normalize_sha256,
@@ -613,9 +614,70 @@ pub async fn download_whisper_model_file(
     Ok(destination)
 }
 
+fn apple_intelligence_reason_label(reason: Option<&str>) -> String {
+    match reason.unwrap_or("apple_intelligence_unavailable") {
+        "device_not_eligible" => "This Mac is not eligible for Apple Intelligence.".to_string(),
+        "apple_intelligence_not_enabled" => {
+            "Apple Intelligence is available on this Mac but is not enabled.".to_string()
+        }
+        "model_not_ready" => "Apple Intelligence is still preparing its on-device model.".to_string(),
+        "unsupported_locale" => "Apple Intelligence is unavailable for the current locale.".to_string(),
+        "foundation_models_requires_macos_26" => {
+            "Apple Intelligence app integration requires macOS 26 or later.".to_string()
+        }
+        other => format!("Apple Intelligence is unavailable: {other}."),
+    }
+}
+
+fn resolve_metadata_backend(
+    mode: models::MetadataBackendMode, apple_intelligence_available: bool, ollama_reachable: bool,
+) -> models::ResolvedMetadataBackend {
+    #[cfg(target_os = "macos")]
+    {
+        match mode {
+            models::MetadataBackendMode::Auto => {
+                if apple_intelligence_available {
+                    models::ResolvedMetadataBackend::AppleIntelligence
+                } else if ollama_reachable {
+                    models::ResolvedMetadataBackend::Ollama
+                } else {
+                    models::ResolvedMetadataBackend::Unavailable
+                }
+            }
+            models::MetadataBackendMode::AppleIntelligence => {
+                if apple_intelligence_available {
+                    models::ResolvedMetadataBackend::AppleIntelligence
+                } else {
+                    models::ResolvedMetadataBackend::Unavailable
+                }
+            }
+            models::MetadataBackendMode::Ollama => {
+                if ollama_reachable {
+                    models::ResolvedMetadataBackend::Ollama
+                } else {
+                    models::ResolvedMetadataBackend::Unavailable
+                }
+            }
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = mode;
+        let _ = apple_intelligence_available;
+        if ollama_reachable {
+            models::ResolvedMetadataBackend::Ollama
+        } else {
+            models::ResolvedMetadataBackend::Unavailable
+        }
+    }
+}
+
 fn compute_setup_guidance(
-    whisper_model_ready: bool, embedding_model_ready: bool, ollama_server_ready: bool,
-    missing_ollama_models: &[String], ollama_error: Option<&str>, ollama_endpoint: &str,
+    whisper_model_ready: bool, embedding_model_ready: bool, metadata_backend_mode: models::MetadataBackendMode,
+    resolved_metadata_backend: models::ResolvedMetadataBackend, apple_intelligence_available: bool,
+    apple_intelligence_reason: Option<&str>, ollama_server_ready: bool, missing_ollama_models: &[String],
+    ollama_error: Option<&str>, ollama_endpoint: &str,
 ) -> Vec<String> {
     let mut guidance = Vec::new();
     if !whisper_model_ready {
@@ -629,10 +691,21 @@ fn compute_setup_guidance(
             "Download the local embedding model into appdata/models/embed to enable semantic search.".to_string(),
         );
     }
-    if !ollama_server_ready {
-        let suffix = ollama_error.unwrap_or("Ollama did not respond.");
+    if resolved_metadata_backend == models::ResolvedMetadataBackend::AppleIntelligence {
+        guidance.push("Metadata generation will use Apple Intelligence on this Mac.".to_string());
+    } else if !ollama_server_ready {
+        let mut suffix = if cfg!(target_os = "macos") && metadata_backend_mode != models::MetadataBackendMode::Ollama {
+            apple_intelligence_reason_label(apple_intelligence_reason)
+        } else {
+            ollama_error.unwrap_or("Ollama did not respond.").to_string()
+        };
+
+        if cfg!(target_os = "macos") && apple_intelligence_available {
+            suffix = "Apple Intelligence is available. Ollama remains optional as a fallback backend.".to_string();
+        }
+
         guidance.push(format!(
-            "{suffix} Install Ollama from https://ollama.com and start it with `ollama serve` for title/summary/tag generation. Configured endpoint: {ollama_endpoint}."
+            "{suffix} Install Ollama from https://ollama.com and start it with `ollama serve` if you want the Ollama metadata backend. Configured endpoint: {ollama_endpoint}."
         ));
     } else if !missing_ollama_models.is_empty() {
         guidance.push(format!(
@@ -644,13 +717,19 @@ fn compute_setup_guidance(
     guidance
 }
 
-pub async fn check_setup_state(app_data_dir: &Path) -> Result<models::SetupStatus, String> {
+pub async fn check_setup_state(app: &tauri::AppHandle, app_data_dir: &Path) -> Result<models::SetupStatus, String> {
     ensure_directory_layout(app_data_dir)?;
     let database_path = database_path_from_app_data(app_data_dir);
     initialize_database(&database_path)?;
 
     let connection = rusqlite::Connection::open(&database_path)
         .map_err(|error| format!("failed to open database {}: {error}", database_path.display()))?;
+    let metadata_backend_mode = match read_setting(&connection, models::SETTING_KEY_METADATA_BACKEND_MODE)? {
+        Some(value) => value
+            .parse()
+            .unwrap_or_else(|_| models::MetadataBackendMode::default_for_current_platform()),
+        None => models::MetadataBackendMode::default_for_current_platform(),
+    };
     let ollama_endpoint = match read_setting(&connection, models::SETTING_KEY_OLLAMA_ENDPOINT)? {
         Some(value) => match normalize_ollama_endpoint(&value) {
             Ok(endpoint) => endpoint,
@@ -669,6 +748,12 @@ pub async fn check_setup_state(app_data_dir: &Path) -> Result<models::SetupStatu
 
     let whisper_model_ready = whisper_model_present(&app_data_dir.join("models"))?;
     let embedding_model_ready = embedding_model_present(&app_data_dir.join("models").join("embed"))?;
+    let apple_probe = apple_intelligence::probe(app).ok();
+    let apple_intelligence_available = apple_probe
+        .as_ref()
+        .is_some_and(|probe| probe.available && probe.supports_locale);
+    let apple_intelligence_reason =
+        if apple_intelligence_available { None } else { apple_probe.and_then(|probe| probe.reason) };
     let (ollama_server_ready, missing_ollama_models, ollama_error) =
         match fetch_ollama_model_names(ollama_endpoint.as_str()).await {
             Ok(models) => {
@@ -684,6 +769,8 @@ pub async fn check_setup_state(app_data_dir: &Path) -> Result<models::SetupStatu
                 Some(error),
             ),
         };
+    let resolved_metadata_backend =
+        resolve_metadata_backend(metadata_backend_mode, apple_intelligence_available, ollama_server_ready);
 
     let all_required_ready = whisper_model_ready && embedding_model_ready;
     set_setup_completed(&database_path, all_required_ready)?;
@@ -693,6 +780,11 @@ pub async fn check_setup_state(app_data_dir: &Path) -> Result<models::SetupStatu
     Ok(models::SetupStatus {
         whisper_model_ready,
         embedding_model_ready,
+        metadata_backend_mode,
+        resolved_metadata_backend,
+        apple_intelligence_available,
+        apple_intelligence_reason: apple_intelligence_reason.clone(),
+        ollama_reachable: ollama_server_ready,
         ollama_server_ready,
         missing_ollama_models: missing_ollama_models.clone(),
         setup_completed,
@@ -700,6 +792,10 @@ pub async fn check_setup_state(app_data_dir: &Path) -> Result<models::SetupStatu
         guidance: compute_setup_guidance(
             whisper_model_ready,
             embedding_model_ready,
+            metadata_backend_mode,
+            resolved_metadata_backend,
+            apple_intelligence_available,
+            apple_intelligence_reason.as_deref(),
             ollama_server_ready,
             &missing_ollama_models,
             ollama_error.as_deref(),
@@ -1017,5 +1113,41 @@ mod tests {
         };
 
         assert!(compute_all_required_passed(&result));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn metadata_backend_resolution_prefers_apple_intelligence_in_auto_mode() {
+        assert_eq!(
+            resolve_metadata_backend(models::MetadataBackendMode::Auto, true, true),
+            models::ResolvedMetadataBackend::AppleIntelligence
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn metadata_backend_resolution_falls_back_to_ollama_when_apple_is_unavailable() {
+        assert_eq!(
+            resolve_metadata_backend(models::MetadataBackendMode::Auto, false, true),
+            models::ResolvedMetadataBackend::Ollama
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn metadata_backend_resolution_respects_forced_ollama_mode() {
+        assert_eq!(
+            resolve_metadata_backend(models::MetadataBackendMode::Ollama, true, true),
+            models::ResolvedMetadataBackend::Ollama
+        );
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn metadata_backend_resolution_uses_ollama_on_non_macos_platforms() {
+        assert_eq!(
+            resolve_metadata_backend(models::MetadataBackendMode::Auto, true, true),
+            models::ResolvedMetadataBackend::Ollama
+        );
     }
 }

@@ -1,28 +1,17 @@
 import { normalizeError } from "$/errors";
+import type {
+  CheckDisplayStatus,
+  CheckStatus,
+  PreflightCheck,
+  PreflightCheckDetail,
+  PreflightPhase,
+} from "$/types/preflight";
+import { PREFLIGHT_CHECK_ORDER, PREFLIGHT_EVENT } from "$/types/preflight";
 import { invoke } from "@tauri-apps/api/core";
 import { EventCallback, listen, type UnlistenFn } from "@tauri-apps/api/event";
 import * as logger from "@tauri-apps/plugin-log";
 import { createContext, onCleanup, onMount, type ParentProps, useContext } from "solid-js";
 import { createStore } from "solid-js/store";
-
-export const PREFLIGHT_EVENT = "preflight://check";
-export const PREFLIGHT_CHECK_ORDER = [
-  "whisper_cli",
-  "ffmpeg",
-  "yt_dlp",
-  "whisper_model",
-  "embedding_model",
-  "ollama_server",
-  "ollama_models",
-  "database",
-] as const;
-
-export type PreflightCheck = (typeof PREFLIGHT_CHECK_ORDER)[number];
-export type CheckStatus = "pass" | "fail" | "warn";
-export type PreflightPhase = "idle" | "running" | "ready" | "failed";
-export type CheckDisplayStatus = CheckStatus | "pending";
-
-export type PreflightCheckDetail = { check: PreflightCheck; status: CheckStatus; message: string };
 
 export type PreflightResult = {
   whisper_cli: CheckStatus;
@@ -41,6 +30,11 @@ export type PreflightResult = {
 export type SetupStatus = {
   whisper_model_ready: boolean;
   embedding_model_ready: boolean;
+  metadata_backend_mode: "auto" | "apple_intelligence" | "ollama";
+  resolved_metadata_backend: "apple_intelligence" | "ollama" | "unavailable";
+  apple_intelligence_available: boolean;
+  apple_intelligence_reason: string | null;
+  ollama_reachable: boolean;
   ollama_server_ready: boolean;
   missing_ollama_models: string[];
   setup_completed: boolean;

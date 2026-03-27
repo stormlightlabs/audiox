@@ -1,10 +1,12 @@
 // TODO: Use a markdown library for parsing and rendering
 import { normalizeError } from "$/errors";
-import { formatDate, formatDuration } from "$/format-utils";
 import { A } from "@solidjs/router";
 import { invoke } from "@tauri-apps/api/core";
 import { createEffect, createMemo, createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import { Motion } from "solid-motionone";
+import { DocumentMetadata, DocumentTags, DocumentTitle } from "./LibraryView/Document";
+import { EmptyState, NoMatchesFound } from "./LibraryView/Empty";
+import { isTextSource } from "./LibraryView/lib";
 import { ViewScaffold } from "./ViewScaffold";
 
 type DocumentSummary = {
@@ -49,33 +51,6 @@ const sourceFilterOptions: Array<{ value: SourceFilter; label: string }> = [
   { value: "recording", label: "Recording" },
   { value: "text", label: "Text Note" },
 ];
-
-function sourceBadgeLabel(sourceType: string): string {
-  if (sourceType === "microphone_recording") {
-    return "Recording";
-  }
-  if (sourceType === "text_note") {
-    return "Text Note";
-  }
-  if (sourceType === "text_paste") {
-    return "Pasted Note";
-  }
-  return "Audio";
-}
-
-function sourceIcon(sourceType: string): string {
-  if (sourceType === "microphone_recording") {
-    return "i-bi-mic-fill";
-  }
-  if (sourceType === "text_note" || sourceType === "text_paste") {
-    return "i-bi-file-text-fill";
-  }
-  return "i-bi-file-music-fill";
-}
-
-function isTextSource(sourceType: string): boolean {
-  return sourceType === "text_note" || sourceType === "text_paste";
-}
 
 function matchesSourceFilter(document: DocumentSummary, filter: SourceFilter): boolean {
   if (filter === "all") {
@@ -135,83 +110,6 @@ function SortControl(props: { sort: DocumentSort; update: (sort: DocumentSort) =
         <For each={sortOptions}>{(option) => <option value={option.value}>{option.label}</option>}</For>
       </select>
     </label>
-  );
-}
-
-function NoMatchesFound() {
-  return (
-    <p class="rounded-xl border border-overlay bg-elevation/65 p-3 text-sm text-subtext">
-      No matching chunks found for this query.
-    </p>
-  );
-}
-
-function EmptyState() {
-  return (
-    <section class="rounded-2xl border border-dashed border-overlay bg-surface/35 p-6">
-      <p class="text-base font-semibold text-text">No matching documents yet</p>
-      <p class="mt-1 text-sm text-subtext">
-        Import audio, record from your microphone, or import a text note to create your first document.
-      </p>
-      <div class="mt-4 flex flex-wrap gap-2">
-        <A
-          href="/import"
-          class="rounded-xl bg-accent px-3 py-1.5 text-xs font-semibold text-surface transition hover:brightness-110">
-          Open Import
-        </A>
-        <A
-          href="/record"
-          class="rounded-xl border border-overlay px-3 py-1.5 text-xs font-semibold text-subtext transition hover:border-accent/35 hover:text-text">
-          Open Record
-        </A>
-      </div>
-    </section>
-  );
-}
-
-function DocumentTags(props: { tags: string[] }) {
-  const tags = () => props.tags;
-  return (
-    <Show when={tags().length > 0}>
-      <div class="mt-2 flex flex-wrap gap-1.5">
-        <For each={tags()}>
-          {(tag) => (
-            <span class="rounded-full border border-overlay px-2 py-0.5 text-[10px] font-semibold text-subtext">
-              {tag}
-            </span>
-          )}
-        </For>
-      </div>
-    </Show>
-  );
-}
-
-function DocumentTitle(props: { sourceType: string; title: string }) {
-  const sourceType = () => props.sourceType;
-  const title = () => props.title;
-  return (
-    <div class="flex flex-wrap items-center gap-2">
-      <span class="flex items-center text-subtext">
-        <i class={`${sourceIcon(sourceType())} size-4`} />
-      </span>
-      <p class="text-base font-semibold text-text">{title() || "Untitled document"}</p>
-    </div>
-  );
-}
-
-function DocumentMetadata(props: { sourceType: string; durationSeconds: number | null; createdAt: string }) {
-  const sourceType = () => props.sourceType;
-  const duration = () => formatDuration(props.durationSeconds);
-  const createdAt = () => formatDate(props.createdAt);
-
-  return (
-    <div class="mt-2 flex flex-wrap items-center gap-2 text-[11px] text-subtext">
-      <span class="rounded-full border border-overlay px-2 py-0.5">{sourceBadgeLabel(sourceType())}</span>
-      <Show when={!isTextSource(sourceType())}>
-        <span>{duration()}</span>
-      </Show>
-      <span>{createdAt()}</span>
-    </div>
   );
 }
 
@@ -492,37 +390,39 @@ export function LibraryView() {
             </Show>
 
             <For each={searchResults()}>
-              {(result, index) => (
-                <Motion.article
-                  initial={{ opacity: 0, y: 14 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  transition={{ duration: 0.22, delay: index() * 0.02 }}
-                  class="rounded-2xl border border-overlay bg-elevation/70 p-4">
-                  <div class="flex flex-wrap items-center justify-between gap-2">
-                    <A
-                      href={`/document/${result.documentId}${
-                        result.segmentStartMs !== null
-                          ? `?segment=${result.segmentStartMs}&q=${encodeURIComponent(activeSearchQuery())}`
-                          : `?q=${encodeURIComponent(activeSearchQuery())}`
-                      }`}
-                      class="text-sm font-semibold text-text transition hover:text-accent">
-                      {result.documentTitle}
-                    </A>
-                    <span class="rounded-full border border-overlay px-2 py-0.5 text-[11px] font-semibold text-subtext">
-                      score {result.similarity.toFixed(3)}
-                    </span>
-                  </div>
-                  <p class="mt-2 text-sm leading-relaxed text-text">
-                    {renderHighlightedChunk(result.chunkContent, activeSearchQuery())}
-                  </p>
-                  <div class="mt-2 flex flex-wrap items-center gap-2 text-[11px] text-subtext">
-                    <span>Chunk #{result.chunkIndex + 1}</span>
-                    <Show when={result.segmentStartMs !== null}>
-                      <span>Jump to {Math.max(0, Math.floor((result.segmentStartMs ?? 0) / 1000))}s</span>
-                    </Show>
-                  </div>
-                </Motion.article>
-              )}
+              {(result, index) => {
+                const segmentLink = () =>
+                  result.segmentStartMs !== null
+                    ? `?segment=${result.segmentStartMs}&q=${encodeURIComponent(activeSearchQuery())}`
+                    : `?q=${encodeURIComponent(activeSearchQuery())}`;
+                return (
+                  <Motion.article
+                    initial={{ opacity: 0, y: 14 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    transition={{ duration: 0.22, delay: index() * 0.02 }}
+                    class="rounded-2xl border border-overlay bg-elevation/70 p-4">
+                    <div class="flex flex-wrap items-center justify-between gap-2">
+                      <A
+                        href={`/document/${result.documentId}${segmentLink()}`}
+                        class="text-sm font-semibold text-text transition hover:text-accent">
+                        {result.documentTitle}
+                      </A>
+                      <span class="rounded-full border border-overlay px-2 py-0.5 text-[11px] font-semibold text-subtext">
+                        score {result.similarity.toFixed(3)}
+                      </span>
+                    </div>
+                    <p class="mt-2 text-sm leading-relaxed text-text">
+                      {renderHighlightedChunk(result.chunkContent, activeSearchQuery())}
+                    </p>
+                    <div class="mt-2 flex flex-wrap items-center gap-2 text-[11px] text-subtext">
+                      <span>Chunk #{result.chunkIndex + 1}</span>
+                      <Show when={result.segmentStartMs !== null}>
+                        <span>Jump to {Math.max(0, Math.floor((result.segmentStartMs ?? 0) / 1000))}s</span>
+                      </Show>
+                    </div>
+                  </Motion.article>
+                );
+              }}
             </For>
           </section>
         </Show>

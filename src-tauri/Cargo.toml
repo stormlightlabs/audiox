@@ -45,6 +45,7 @@ tauri-plugin-audio-recorder = "0.1"
 fastembed = "5"
 comrak = { version = "0.51.0", features = ["syntect"] }
 syntect = "5.3.0"
+libloading = "0.8.9"
 
 [lints.clippy]
 bool_comparison = "deny"

@@ -62,6 +62,85 @@ fn ensure_debug_sidecars() -> Result<(), String> {
     Ok(())
 }
 
+fn apple_intelligence_bridge_path(manifest_dir: &str) -> std::path::PathBuf {
+    Path::new(manifest_dir)
+        .join("binaries")
+        .join("libmurmur_apple_intelligence.dylib")
+}
+
+fn ensure_apple_intelligence_bridge() -> Result<(), String> {
+    let target = env::var("TARGET").map_err(|error| format!("missing TARGET env var: {error}"))?;
+    if !target.contains("apple-darwin") {
+        return Ok(());
+    }
+
+    let manifest_dir =
+        env::var("CARGO_MANIFEST_DIR").map_err(|error| format!("missing CARGO_MANIFEST_DIR env var: {error}"))?;
+    let source_path = Path::new(&manifest_dir)
+        .join("native")
+        .join("apple_intelligence_bridge.swift");
+    let binaries_dir = Path::new(&manifest_dir).join("binaries");
+    let output_path = apple_intelligence_bridge_path(&manifest_dir);
+    let module_cache_path = Path::new(&manifest_dir).join("target").join("swift-module-cache");
+
+    fs::create_dir_all(&binaries_dir).map_err(|error| {
+        format!(
+            "failed to create bridge output directory {}: {error}",
+            binaries_dir.display()
+        )
+    })?;
+    fs::create_dir_all(&module_cache_path).map_err(|error| {
+        format!(
+            "failed to create Swift module cache directory {}: {error}",
+            module_cache_path.display()
+        )
+    })?;
+
+    let sdk_output = std::process::Command::new("xcrun")
+        .args(["--show-sdk-path", "--sdk", "macosx"])
+        .output()
+        .map_err(|error| format!("failed to resolve macOS SDK path with xcrun: {error}"))?;
+    if !sdk_output.status.success() {
+        return Err(format!(
+            "xcrun failed to resolve macOS SDK path: {}",
+            String::from_utf8_lossy(&sdk_output.stderr).trim()
+        ));
+    }
+    let sdk_path = String::from_utf8(sdk_output.stdout)
+        .map_err(|error| format!("macOS SDK path from xcrun was not valid UTF-8: {error}"))?
+        .trim()
+        .to_string();
+
+    let mut command = std::process::Command::new("swiftc");
+    command
+        .arg("-sdk")
+        .arg(&sdk_path)
+        .arg("-parse-as-library")
+        .arg("-emit-library")
+        .arg("-module-cache-path")
+        .arg(&module_cache_path)
+        .arg("-o")
+        .arg(&output_path)
+        .arg(&source_path);
+
+    let output = command
+        .output()
+        .map_err(|error| format!("failed to compile Apple Intelligence bridge with swiftc: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "swiftc failed to compile {}: {}",
+            source_path.display(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+
+    println!(
+        "cargo:rustc-env=MURMUR_APPLE_INTELLIGENCE_BRIDGE_PATH={}",
+        output_path.display()
+    );
+    Ok(())
+}
+
 fn git_describe_version() -> Option<String> {
     let output = std::process::Command::new("git")
         .args(["describe", "--tags", "--long", "--always", "--dirty"])
@@ -84,6 +163,7 @@ fn git_describe_version() -> Option<String> {
 fn main() {
     println!("cargo:rerun-if-changed=.git/HEAD");
     println!("cargo:rerun-if-env-changed=MURMUR_APP_VERSION");
+    println!("cargo:rerun-if-changed=native/apple_intelligence_bridge.swift");
 
     let version = std::env::var("MURMUR_APP_VERSION")
         .ok()
@@ -94,6 +174,9 @@ fn main() {
     println!("cargo:rustc-env=MURMUR_APP_VERSION={version}");
 
     if let Err(error) = ensure_debug_sidecars() {
+        panic!("{error}");
+    }
+    if let Err(error) = ensure_apple_intelligence_bridge() {
         panic!("{error}");
     }
     tauri_build::build()

@@ -3378,6 +3378,7 @@ dependencies = [
  "chrono",
  "comrak",
  "fastembed",
+ "libloading 0.8.9",
  "log",
  "regex",
  "reqwest 0.12.28",

@@ -1,4 +1,4 @@
-use super::{bootstrap, embedding, models, parsers, storage};
+use super::{apple_intelligence, bootstrap, embedding, models, parsers, storage};
 use chrono::Utc;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::Value;
@@ -82,6 +82,14 @@ fn load_runtime_settings_from_connection(connection: &Connection) -> Result<mode
     let whisper_threads =
         parse_whisper_thread_setting(storage::read_setting(connection, models::SETTING_KEY_WHISPER_THREADS)?);
 
+    let metadata_backend_mode_raw = read_setting_with_default(
+        connection,
+        models::SETTING_KEY_METADATA_BACKEND_MODE,
+        models::MetadataBackendMode::default_for_current_platform().as_str(),
+    )?;
+    let metadata_backend_mode = parsers::validate_metadata_backend_mode(&metadata_backend_mode_raw)
+        .unwrap_or_else(|_| models::MetadataBackendMode::default_for_current_platform());
+
     let ollama_endpoint_raw = read_setting_with_default(
         connection,
         models::SETTING_KEY_OLLAMA_ENDPOINT,
@@ -90,13 +98,166 @@ fn load_runtime_settings_from_connection(connection: &Connection) -> Result<mode
     let ollama_endpoint = parsers::normalize_ollama_endpoint(&ollama_endpoint_raw)
         .unwrap_or_else(|_| models::OLLAMA_DEFAULT_ENDPOINT.to_string());
 
-    Ok(models::AppSettings { whisper_model, whisper_language, whisper_threads, ollama_endpoint })
+    Ok(
+        models::AppSettings {
+            whisper_model,
+            whisper_language,
+            whisper_threads,
+            metadata_backend_mode,
+            ollama_endpoint,
+        },
+    )
 }
 
 fn load_runtime_settings(database_path: &Path) -> Result<models::AppSettings, String> {
     let connection = Connection::open(database_path)
         .map_err(|error| format!("failed to open database {}: {error}", database_path.display()))?;
     load_runtime_settings_from_connection(&connection)
+}
+
+#[derive(Debug, Clone)]
+struct InternalMetadataBackendStatus {
+    mode: models::MetadataBackendMode,
+    resolved_backend: models::ResolvedMetadataBackend,
+    apple_intelligence_available: bool,
+    apple_intelligence_reason: Option<String>,
+    ollama_reachable: bool,
+    installed_ollama_models: Vec<String>,
+    missing_ollama_models: Vec<String>,
+    message: String,
+}
+
+fn apple_intelligence_reason_label(reason: Option<&str>) -> String {
+    match reason.unwrap_or("apple_intelligence_unavailable") {
+        "device_not_eligible" => "This Mac is not eligible for Apple Intelligence.".to_string(),
+        "apple_intelligence_not_enabled" => {
+            "Apple Intelligence is available on this Mac but is not enabled.".to_string()
+        }
+        "model_not_ready" => "Apple Intelligence is still preparing its on-device model.".to_string(),
+        "unsupported_locale" => "Apple Intelligence is unavailable for the current locale.".to_string(),
+        "foundation_models_requires_macos_26" => {
+            "Apple Intelligence app integration requires macOS 26 or later.".to_string()
+        }
+        other => format!("Apple Intelligence is unavailable: {other}."),
+    }
+}
+
+fn resolve_metadata_backend(
+    mode: models::MetadataBackendMode, apple_intelligence_available: bool, ollama_reachable: bool,
+) -> models::ResolvedMetadataBackend {
+    #[cfg(target_os = "macos")]
+    {
+        match mode {
+            models::MetadataBackendMode::Auto => {
+                if apple_intelligence_available {
+                    models::ResolvedMetadataBackend::AppleIntelligence
+                } else if ollama_reachable {
+                    models::ResolvedMetadataBackend::Ollama
+                } else {
+                    models::ResolvedMetadataBackend::Unavailable
+                }
+            }
+            models::MetadataBackendMode::AppleIntelligence => {
+                if apple_intelligence_available {
+                    models::ResolvedMetadataBackend::AppleIntelligence
+                } else {
+                    models::ResolvedMetadataBackend::Unavailable
+                }
+            }
+            models::MetadataBackendMode::Ollama => {
+                if ollama_reachable {
+                    models::ResolvedMetadataBackend::Ollama
+                } else {
+                    models::ResolvedMetadataBackend::Unavailable
+                }
+            }
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = mode;
+        let _ = apple_intelligence_available;
+        if ollama_reachable {
+            models::ResolvedMetadataBackend::Ollama
+        } else {
+            models::ResolvedMetadataBackend::Unavailable
+        }
+    }
+}
+
+async fn fetch_metadata_backend_status(
+    app: &tauri::AppHandle, settings: &models::AppSettings,
+) -> InternalMetadataBackendStatus {
+    let apple_probe = apple_intelligence::probe(app).ok();
+    let apple_intelligence_available = apple_probe
+        .as_ref()
+        .is_some_and(|probe| probe.available && probe.supports_locale);
+    let apple_intelligence_reason =
+        if apple_intelligence_available { None } else { apple_probe.and_then(|probe| probe.reason) };
+
+    let (ollama_reachable, installed_ollama_models, missing_ollama_models) =
+        match bootstrap::fetch_ollama_model_names(settings.ollama_endpoint.as_str()).await {
+            Ok(installed_models) => {
+                let missing_models = parsers::missing_required_ollama_models(&installed_models);
+                (true, installed_models, missing_models)
+            }
+            Err(_) => (
+                false,
+                Vec::new(),
+                models::REQUIRED_OLLAMA_MODELS
+                    .iter()
+                    .map(|item| (*item).to_string())
+                    .collect(),
+            ),
+        };
+
+    let resolved_backend = resolve_metadata_backend(
+        settings.metadata_backend_mode,
+        apple_intelligence_available,
+        ollama_reachable,
+    );
+    let message = match resolved_backend {
+        models::ResolvedMetadataBackend::AppleIntelligence => {
+            "Metadata generation will use Apple Intelligence.".to_string()
+        }
+        models::ResolvedMetadataBackend::Ollama => {
+            if missing_ollama_models.is_empty() {
+                "Metadata generation will use Ollama.".to_string()
+            } else {
+                format!(
+                    "Ollama is selected for metadata generation, but models are still missing: {}.",
+                    missing_ollama_models.join(", ")
+                )
+            }
+        }
+        models::ResolvedMetadataBackend::Unavailable => {
+            if settings.metadata_backend_mode == models::MetadataBackendMode::AppleIntelligence {
+                apple_intelligence_reason_label(apple_intelligence_reason.as_deref())
+            } else if apple_intelligence_available {
+                "Apple Intelligence is available, but the configured metadata backend is unavailable.".to_string()
+            } else if ollama_reachable {
+                "Ollama is reachable, but the selected metadata backend is unavailable.".to_string()
+            } else {
+                format!(
+                    "{} Ollama is also unavailable at {}.",
+                    apple_intelligence_reason_label(apple_intelligence_reason.as_deref()),
+                    settings.ollama_endpoint
+                )
+            }
+        }
+    };
+
+    InternalMetadataBackendStatus {
+        mode: settings.metadata_backend_mode,
+        resolved_backend,
+        apple_intelligence_available,
+        apple_intelligence_reason,
+        ollama_reachable,
+        installed_ollama_models,
+        missing_ollama_models,
+        message,
+    }
 }
 
 fn whisper_model_name_from_file_name(file_name: &str) -> Option<String> {
@@ -374,6 +535,54 @@ async fn generate_metadata_with_retry(
     Err(final_error)
 }
 
+async fn generate_metadata_for_backend(
+    app: &tauri::AppHandle, transcript: &str, fallback_title: &str, progress_event: models::ProgressEvent,
+    runtime_settings: &models::AppSettings,
+) -> Result<(GeneratedMetadata, String), String> {
+    let backend_status = fetch_metadata_backend_status(app, runtime_settings).await;
+
+    match backend_status.resolved_backend {
+        models::ResolvedMetadataBackend::AppleIntelligence => {
+            emit_metadata_progress(
+                app,
+                progress_event,
+                "running",
+                "Generating title, summary, and tags with Apple Intelligence...",
+                18.0,
+            );
+            let apple_intelligence::Metadata { title, summary, tags } =
+                apple_intelligence::generate_metadata(app, transcript, fallback_title)
+                    .map_err(|error| format!("Apple Intelligence metadata generation failed: {error}"))?;
+            emit_metadata_progress(
+                app,
+                progress_event,
+                "running",
+                "Metadata generated with Apple Intelligence. Preparing embeddings...",
+                62.0,
+            );
+            Ok((
+                GeneratedMetadata { title, summary, tags: parsers::sanitize_tags(&tags) },
+                "Apple Intelligence".to_string(),
+            ))
+        }
+        models::ResolvedMetadataBackend::Ollama => {
+            let client = reqwest::Client::builder()
+                .timeout(Duration::from_secs(120))
+                .build()
+                .map_err(|error| format!("failed to initialize Ollama HTTP client: {error}"))?;
+            generate_metadata_with_retry(
+                app,
+                &client,
+                transcript,
+                progress_event,
+                runtime_settings.ollama_endpoint.as_str(),
+            )
+            .await
+        }
+        models::ResolvedMetadataBackend::Unavailable => Err(backend_status.message),
+    }
+}
+
 fn cleanup_transcription_outputs(output_base: &Path) {
     for extension in ["json", "srt", "vtt", "txt"] {
         let output_path = output_base.with_extension(extension);
@@ -490,23 +699,24 @@ fn matches_all_tags(document_tags: &[String], filter_tags: &[String]) -> bool {
 }
 
 fn embedding_from_blob(blob: &[u8]) -> Result<Vec<f32>, String> {
-    if !blob.len().is_multiple_of(4) {
-        return Err(format!(
-            "invalid embedding blob size {}; expected a multiple of 4",
+    match blob.len().checked_div(4) {
+        Some(count) if count > 0 => {
+            let mut embedding = Vec::with_capacity(count);
+            for chunk in blob.chunks_exact(4) {
+                embedding.push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
+            }
+
+            if embedding.is_empty() {
+                Err("embedding blob decoded to an empty vector".to_string())
+            } else {
+                Ok(embedding)
+            }
+        }
+        _ => Err(format!(
+            "invalid embedding blob size {}; expected a positive multiple of 4",
             blob.len()
-        ));
+        )),
     }
-
-    let mut embedding = Vec::with_capacity(blob.len() / 4);
-    for chunk in blob.chunks_exact(4) {
-        embedding.push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
-    }
-
-    if embedding.is_empty() {
-        return Err("embedding blob decoded to an empty vector".to_string());
-    }
-
-    Ok(embedding)
 }
 
 fn embedding_to_blob(embedding: &[f32]) -> Vec<u8> {
@@ -622,22 +832,12 @@ fn find_matching_segment_for_chunk(
 
 async fn process_document_ai(
     app: &tauri::AppHandle, transcript: &str, segments: &[models::TranscriptSegment], fallback_title: &str,
-    progress_event: models::ProgressEvent, ollama_endpoint: &str,
+    progress_event: models::ProgressEvent, runtime_settings: &models::AppSettings,
 ) -> Result<(String, Option<String>, Vec<String>, Vec<models::EmbeddedChunk>), String> {
-    emit_metadata_progress(
-        app,
-        progress_event,
-        "running",
-        "Starting Gemma transcript enrichment...",
-        5.0,
-    );
+    emit_metadata_progress(app, progress_event, "running", "Starting metadata enrichment...", 5.0);
 
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(120))
-        .build()
-        .map_err(|error| format!("failed to initialize Ollama HTTP client: {error}"))?;
-    let (generated, generate_model) =
-        generate_metadata_with_retry(app, &client, transcript, progress_event, ollama_endpoint).await?;
+    let (generated, metadata_backend_label) =
+        generate_metadata_for_backend(app, transcript, fallback_title, progress_event, runtime_settings).await?;
 
     let title = generated
         .title
@@ -687,7 +887,7 @@ async fn process_document_ai(
         app,
         progress_event,
         "completed",
-        format!("Gemma enrichment complete with {generate_model}. Embeddings ready."),
+        format!("Metadata enrichment complete with {metadata_backend_label}. Embeddings ready."),
         100.0,
     );
 
@@ -732,7 +932,7 @@ async fn import_text_document(
         &segments,
         fallback_title,
         models::ProgressEvent::ImportMetadata,
-        runtime_settings.ollama_endpoint.as_str(),
+        &runtime_settings,
     )
     .await?;
     let keywords_csv = parsers::serialize_keywords_csv(&tags);
@@ -808,7 +1008,7 @@ pub fn get_app_settings(app: tauri::AppHandle) -> Result<models::AppSettings, St
 #[allow(clippy::needless_pass_by_value)]
 pub fn save_app_settings(
     app: tauri::AppHandle, whisper_model: Option<String>, whisper_language: Option<String>,
-    whisper_threads: Option<usize>, ollama_endpoint: Option<String>,
+    whisper_threads: Option<usize>, metadata_backend_mode: Option<String>, ollama_endpoint: Option<String>,
 ) -> Result<models::AppSettings, String> {
     let (app_data_dir, database_path) = managed_paths(&app);
     storage::ensure_directory_layout(&app_data_dir)?;
@@ -838,6 +1038,11 @@ pub fn save_app_settings(
         }
         None => current_settings.whisper_threads,
     };
+    let next_metadata_backend_mode = metadata_backend_mode
+        .as_deref()
+        .map(parsers::validate_metadata_backend_mode)
+        .transpose()?
+        .unwrap_or(current_settings.metadata_backend_mode);
     let next_ollama_endpoint = ollama_endpoint
         .as_deref()
         .map(parsers::normalize_ollama_endpoint)
@@ -862,6 +1067,11 @@ pub fn save_app_settings(
     )?;
     storage::write_setting(
         &database_path,
+        models::SETTING_KEY_METADATA_BACKEND_MODE,
+        next_metadata_backend_mode.as_str(),
+    )?;
+    storage::write_setting(
+        &database_path,
         models::SETTING_KEY_OLLAMA_ENDPOINT,
         next_ollama_endpoint.as_str(),
     )?;
@@ -870,6 +1080,7 @@ pub fn save_app_settings(
         whisper_model: next_whisper_model,
         whisper_language: next_whisper_language,
         whisper_threads: next_whisper_threads,
+        metadata_backend_mode: next_metadata_backend_mode,
         ollama_endpoint: next_ollama_endpoint,
     })
 }
@@ -968,6 +1179,28 @@ pub async fn check_ollama_connection(app: tauri::AppHandle) -> Result<models::Ol
 
 #[tauri::command]
 #[allow(clippy::needless_pass_by_value)]
+pub async fn get_metadata_backend_status(app: tauri::AppHandle) -> Result<models::MetadataBackendStatus, String> {
+    let (app_data_dir, database_path) = managed_paths(&app);
+    storage::ensure_directory_layout(&app_data_dir)?;
+    storage::initialize_database(&database_path)?;
+    let settings = load_runtime_settings(&database_path)?;
+    let status = fetch_metadata_backend_status(&app, &settings).await;
+
+    Ok(models::MetadataBackendStatus {
+        mode: status.mode,
+        resolved_backend: status.resolved_backend,
+        apple_intelligence_available: status.apple_intelligence_available,
+        apple_intelligence_reason: status.apple_intelligence_reason,
+        ollama_endpoint: settings.ollama_endpoint,
+        ollama_reachable: status.ollama_reachable,
+        installed_ollama_models: status.installed_ollama_models,
+        missing_ollama_models: status.missing_ollama_models,
+        message: status.message,
+    })
+}
+
+#[tauri::command]
+#[allow(clippy::needless_pass_by_value)]
 pub async fn download_whisper_model(app: tauri::AppHandle, model: Option<String>) -> Result<String, String> {
     let (app_data_dir, database_path) = managed_paths(&app);
     storage::ensure_directory_layout(&app_data_dir)?;
@@ -976,7 +1209,7 @@ pub async fn download_whisper_model(app: tauri::AppHandle, model: Option<String>
         parsers::validate_whisper_model_name(model.as_deref().unwrap_or(models::WHISPER_DEFAULTS.model_name))?;
     let model_path = bootstrap::download_whisper_model_file(&app, &app_data_dir, &model_name).await?;
     storage::initialize_database(&database_path)?;
-    let setup_status = bootstrap::check_setup_state(&app_data_dir).await?;
+    let setup_status = bootstrap::check_setup_state(&app, &app_data_dir).await?;
     log::info!(
         "downloaded whisper model {} to {} (all_required_ready={})",
         model_name,
@@ -998,7 +1231,7 @@ pub async fn download_embedding_model(app: tauri::AppHandle) -> Result<(), Strin
     embedding_state.ensure_ready()?;
     emit_embedding_setup_progress(&app, "completed", "Local embedding model is ready.", 100.0);
 
-    let setup_status = bootstrap::check_setup_state(&app_data_dir).await?;
+    let setup_status = bootstrap::check_setup_state(&app, &app_data_dir).await?;
     log::info!(
         "local embedding model ready at {} (all_required_ready={})",
         embedding_state.cache_dir().display(),
@@ -1093,7 +1326,7 @@ pub async fn pull_ollama_model(app: tauri::AppHandle, model: String) -> Result<(
     }
 
     let (app_data_dir, _) = managed_paths(&app);
-    let setup_status = bootstrap::check_setup_state(&app_data_dir).await?;
+    let setup_status = bootstrap::check_setup_state(&app, &app_data_dir).await?;
     log::info!(
         "pulled ollama model {} (missing_models_after_pull={})",
         model_name,
@@ -1313,7 +1546,7 @@ pub async fn enrich_document_metadata(app: tauri::AppHandle, id: String) -> Resu
         &current_document.segments,
         &fallback_title,
         models::ProgressEvent::DocumentMetadata,
-        runtime_settings.ollama_endpoint.as_str(),
+        &runtime_settings,
     )
     .await?;
     let keywords_csv = parsers::serialize_keywords_csv(&tags);
@@ -1592,20 +1825,23 @@ pub async fn preflight(app: tauri::AppHandle) -> Result<models::PreflightResult,
 
     storage::ensure_directory_layout(&app_data_dir)?;
 
-    let ollama_endpoint = match storage::initialize_database(&database_path)
-        .and_then(|_| load_runtime_settings(&database_path))
-        .map(|settings| settings.ollama_endpoint)
-    {
-        Ok(endpoint) => endpoint,
-        Err(error) => {
-            log::warn!(
-                "failed to load persisted Ollama endpoint for preflight: {}; using {}",
-                error,
-                models::OLLAMA_DEFAULT_ENDPOINT
-            );
-            models::OLLAMA_DEFAULT_ENDPOINT.to_string()
-        }
-    };
+    let runtime_settings =
+        match storage::initialize_database(&database_path).and_then(|_| load_runtime_settings(&database_path)) {
+            Ok(settings) => settings,
+            Err(error) => {
+                log::warn!(
+                    "failed to load persisted app settings for preflight: {}; using platform defaults",
+                    error,
+                );
+                models::AppSettings {
+                    whisper_model: models::WHISPER_DEFAULTS.model_name.to_string(),
+                    whisper_language: models::WHISPER_LANGUAGE_AUTO.to_string(),
+                    whisper_threads: models::WHISPER_DEFAULTS.threads,
+                    metadata_backend_mode: models::MetadataBackendMode::default_for_current_platform(),
+                    ollama_endpoint: models::OLLAMA_DEFAULT_ENDPOINT.to_string(),
+                }
+            }
+        };
 
     let mut result = models::PreflightResult::default();
 
@@ -1726,55 +1962,84 @@ pub async fn preflight(app: tauri::AppHandle) -> Result<models::PreflightResult,
         }
     };
 
-    match bootstrap::fetch_ollama_model_names(ollama_endpoint.as_str()).await {
-        Ok(models) => {
-            bootstrap::record_preflight_detail(
-                &app,
-                &mut result,
-                models::PreflightCheck::OllamaServer,
-                models::CheckStatus::Pass,
-                "Ollama server is reachable.",
-            );
-            let missing_models = parsers::missing_required_ollama_models(&models);
-            if missing_models.is_empty() {
+    let metadata_backend = fetch_metadata_backend_status(&app, &runtime_settings).await;
+    if metadata_backend.apple_intelligence_available
+        && runtime_settings.metadata_backend_mode != models::MetadataBackendMode::Ollama
+    {
+        bootstrap::record_preflight_detail(
+            &app,
+            &mut result,
+            models::PreflightCheck::OllamaServer,
+            models::CheckStatus::Pass,
+            "Apple Intelligence is available on this Mac. Ollama remains optional as a fallback backend.",
+        );
+        bootstrap::record_preflight_detail(
+            &app,
+            &mut result,
+            models::PreflightCheck::OllamaModels,
+            models::CheckStatus::Pass,
+            "Apple Intelligence is available, so Ollama model checks are optional on this Mac.",
+        );
+    } else {
+        match bootstrap::fetch_ollama_model_names(runtime_settings.ollama_endpoint.as_str()).await {
+            Ok(models) => {
                 bootstrap::record_preflight_detail(
                     &app,
                     &mut result,
-                    models::PreflightCheck::OllamaModels,
+                    models::PreflightCheck::OllamaServer,
                     models::CheckStatus::Pass,
-                    "Required Ollama generate models are available.",
+                    "Ollama server is reachable.",
                 );
-            } else {
+                let missing_models = parsers::missing_required_ollama_models(&models);
+                if missing_models.is_empty() {
+                    bootstrap::record_preflight_detail(
+                        &app,
+                        &mut result,
+                        models::PreflightCheck::OllamaModels,
+                        models::CheckStatus::Pass,
+                        "Required Ollama generate models are available.",
+                    );
+                } else {
+                    bootstrap::record_preflight_detail(
+                        &app,
+                        &mut result,
+                        models::PreflightCheck::OllamaModels,
+                        models::CheckStatus::Warn,
+                        format!(
+                            "Missing Ollama models for metadata generation: {}. Pull them with `ollama pull <model>`.",
+                            missing_models.join(", ")
+                        ),
+                    );
+                }
+            }
+            Err(error) => {
+                let guidance = if cfg!(target_os = "macos") {
+                    format!(
+                        "{} Start Ollama with `ollama serve` to use the fallback metadata backend. Endpoint: {}",
+                        apple_intelligence_reason_label(metadata_backend.apple_intelligence_reason.as_deref()),
+                        runtime_settings.ollama_endpoint
+                    )
+                } else {
+                    format!(
+                        "{error} Start Ollama with `ollama serve` to enable title/summary/tag generation. Endpoint: {}",
+                        runtime_settings.ollama_endpoint
+                    )
+                };
+                bootstrap::record_preflight_detail(
+                    &app,
+                    &mut result,
+                    models::PreflightCheck::OllamaServer,
+                    models::CheckStatus::Warn,
+                    guidance,
+                );
                 bootstrap::record_preflight_detail(
                     &app,
                     &mut result,
                     models::PreflightCheck::OllamaModels,
                     models::CheckStatus::Warn,
-                    format!(
-                        "Missing Ollama models for metadata generation: {}. Pull them with `ollama pull <model>`.",
-                        missing_models.join(", ")
-                    ),
+                    "Required Ollama models could not be verified because the server is unavailable.",
                 );
             }
-        }
-        Err(error) => {
-            bootstrap::record_preflight_detail(
-                &app,
-                &mut result,
-                models::PreflightCheck::OllamaServer,
-                models::CheckStatus::Warn,
-                format!(
-                    "{error} Start Ollama with `ollama serve` to enable title/summary/tag generation. Endpoint: {}",
-                    ollama_endpoint
-                ),
-            );
-            bootstrap::record_preflight_detail(
-                &app,
-                &mut result,
-                models::PreflightCheck::OllamaModels,
-                models::CheckStatus::Warn,
-                "Required Ollama models could not be verified because the server is unavailable.",
-            );
         }
     }
 
@@ -1888,7 +2153,7 @@ pub async fn import_audio_file(app: tauri::AppHandle, source_path: String) -> Re
         &segments,
         &fallback_title,
         models::ProgressEvent::ImportMetadata,
-        runtime_settings.ollama_endpoint.as_str(),
+        &runtime_settings,
     )
     .await?;
     let keywords_csv = parsers::serialize_keywords_csv(&tags);
@@ -2005,7 +2270,7 @@ pub async fn import_recorded_audio(
         &segments,
         &fallback_title,
         models::ProgressEvent::ImportMetadata,
-        runtime_settings.ollama_endpoint.as_str(),
+        &runtime_settings,
     )
     .await?;
     let keywords_csv = parsers::serialize_keywords_csv(&tags);
@@ -2089,7 +2354,7 @@ pub async fn import_text_content(
 pub async fn check_setup(app: tauri::AppHandle) -> Result<models::SetupStatus, String> {
     let (app_data_dir, _) = managed_paths(&app);
 
-    let setup = bootstrap::check_setup_state(&app_data_dir).await?;
+    let setup = bootstrap::check_setup_state(&app, &app_data_dir).await?;
     log::info!(
         "setup status: whisper_ready={}, embedding_ready={}, ollama_server_ready={}, missing_models={}, completed={}",
         setup.whisper_model_ready,

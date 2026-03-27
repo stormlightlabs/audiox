@@ -1,13 +1,10 @@
+import { Accordion } from "$/components/Accordion";
+import { useAppContext } from "$/state/AppContext";
+import type { CheckDisplayStatus, PreflightCheck } from "$/types/preflight";
+import { PREFLIGHT_CHECK_ORDER } from "$/types/preflight";
 import { useNavigate } from "@solidjs/router";
 import { createEffect, For, Match, onCleanup, Show, Switch } from "solid-js";
 import { Motion } from "solid-motionone";
-import { Accordion } from "../components/Accordion";
-import {
-  type CheckDisplayStatus,
-  PREFLIGHT_CHECK_ORDER,
-  type PreflightCheck,
-  useAppContext,
-} from "../state/AppContext";
 
 type CheckMeta = { key: PreflightCheck; title: string };
 
@@ -149,13 +146,14 @@ export function SplashView() {
       <div class="grid gap-6">
         <header class="space-y-4 text-center">
           <div class="mx-auto grid size-16 place-content-center rounded-2xl border border-accent/40 bg-accent/10 text-xl font-bold text-accent">
-            AX
+            M
           </div>
           <div class="space-y-2">
             <p class="text-xs tracking-[0.24em] text-subtext uppercase">Startup Preflight</p>
             <h1 class="font-display text-4xl text-text">Murmur</h1>
             <p class="text-sm text-subtext">
-              Checking sidecars, local models, Ollama generate support, and local database before opening the app.
+              Checking sidecars, local models, metadata generation support, and the local database before opening the
+              app.
             </p>
           </div>
         </header>

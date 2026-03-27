@@ -13,6 +13,7 @@ pub const SETTING_KEY_WHISPER_MODEL: &str = "whisper_model";
 pub const SETTING_KEY_WHISPER_LANGUAGE: &str = "whisper_language";
 pub const SETTING_KEY_WHISPER_THREADS: &str = "whisper_threads";
 pub const SETTING_KEY_OLLAMA_ENDPOINT: &str = "ollama_endpoint";
+pub const SETTING_KEY_METADATA_BACKEND_MODE: &str = "metadata_backend_mode";
 pub const WHISPER_LANGUAGE_AUTO: &str = "auto";
 pub const OLLAMA_DEFAULT_ENDPOINT: &str = "http://localhost:11434";
 pub const WHISPER_MIN_THREADS: usize = 1;
@@ -111,6 +112,81 @@ pub const EMBEDDING_CHUNK_TARGET_WORDS: usize = 384;
 pub const ALLOWED_IMPORT_EXTENSIONS: [&str; 7] = ["mp3", "m4a", "wav", "flac", "ogg", "opus", "webm"];
 pub const ALLOWED_TEXT_IMPORT_EXTENSIONS: [&str; 2] = ["txt", "md"];
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MetadataBackendMode {
+    Auto,
+    AppleIntelligence,
+    Ollama,
+}
+
+impl MetadataBackendMode {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::AppleIntelligence => "apple_intelligence",
+            Self::Ollama => "ollama",
+        }
+    }
+
+    pub const fn default_for_current_platform() -> Self {
+        #[cfg(target_os = "macos")]
+        {
+            Self::Auto
+        }
+
+        #[cfg(not(target_os = "macos"))]
+        {
+            Self::Ollama
+        }
+    }
+}
+
+impl Display for MetadataBackendMode {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for MetadataBackendMode {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.trim() {
+            "auto" => Ok(Self::Auto),
+            "apple_intelligence" => Ok(Self::AppleIntelligence),
+            "ollama" => Ok(Self::Ollama),
+            other => Err(format!(
+                "invalid metadata backend mode '{other}'. Expected 'auto', 'apple_intelligence', or 'ollama'."
+            )),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResolvedMetadataBackend {
+    AppleIntelligence,
+    Ollama,
+    Unavailable,
+}
+
+impl ResolvedMetadataBackend {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::AppleIntelligence => "apple_intelligence",
+            Self::Ollama => "ollama",
+            Self::Unavailable => "unavailable",
+        }
+    }
+}
+
+impl Display for ResolvedMetadataBackend {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 pub enum SearchLimit {
     Default,
     Max,
@@ -201,6 +277,11 @@ pub struct PreflightResult {
 pub struct SetupStatus {
     pub whisper_model_ready: bool,
     pub embedding_model_ready: bool,
+    pub metadata_backend_mode: MetadataBackendMode,
+    pub resolved_metadata_backend: ResolvedMetadataBackend,
+    pub apple_intelligence_available: bool,
+    pub apple_intelligence_reason: Option<String>,
+    pub ollama_reachable: bool,
     pub ollama_server_ready: bool,
     pub missing_ollama_models: Vec<String>,
     pub setup_completed: bool,
@@ -214,7 +295,22 @@ pub struct AppSettings {
     pub whisper_model: String,
     pub whisper_language: String,
     pub whisper_threads: usize,
+    pub metadata_backend_mode: MetadataBackendMode,
     pub ollama_endpoint: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MetadataBackendStatus {
+    pub mode: MetadataBackendMode,
+    pub resolved_backend: ResolvedMetadataBackend,
+    pub apple_intelligence_available: bool,
+    pub apple_intelligence_reason: Option<String>,
+    pub ollama_endpoint: String,
+    pub ollama_reachable: bool,
+    pub installed_ollama_models: Vec<String>,
+    pub missing_ollama_models: Vec<String>,
+    pub message: String,
 }
 
 #[derive(Clone, Debug, Serialize)]

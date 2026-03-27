@@ -345,6 +345,10 @@ impl DataStore {
             models::SETTING_KEY_WHISPER_THREADS,
             &models::WHISPER_DEFAULTS.threads.to_string(),
         )?;
+        self.ensure_setting_with_default(
+            models::SETTING_KEY_METADATA_BACKEND_MODE,
+            models::MetadataBackendMode::default_for_current_platform().as_str(),
+        )?;
         self.ensure_setting_with_default(models::SETTING_KEY_OLLAMA_ENDPOINT, models::OLLAMA_DEFAULT_ENDPOINT)?;
         self.upsert_setting("last_bootstrap_at", &Utc::now().to_rfc3339())?;
 
