@@ -443,7 +443,7 @@ export function SetupView() {
   return (
     <ViewScaffold
       eyebrow="Setup"
-      title="First-run setup wizard"
+      title="Getting things ready"
       description="Install the first-run model dependencies so transcription and document processing are ready.">
       <section class="space-y-4 rounded-3xl border border-overlay bg-elevation/85 p-4 sm:p-6">
         <div class="grid grid-cols-1 gap-3 xl:grid-cols-2">

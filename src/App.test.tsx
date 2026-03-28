@@ -141,7 +141,7 @@ describe("Preflight flow", () => {
     render(() => <App />);
 
     expect(await screen.findByRole("heading", { name: "Murmur" })).toBeInTheDocument();
-    await waitFor(() => expect(screen.getByRole("heading", { name: "First-run setup wizard" })).toBeInTheDocument(), {
+    await waitFor(() => expect(screen.getByRole("heading", { name: "Getting things ready" })).toBeInTheDocument(), {
       timeout: 3000,
     });
   });

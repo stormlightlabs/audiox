@@ -3,8 +3,10 @@ use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
+use std::time::SystemTime;
 
 const SIDECAR_TOOLS: [&str; 3] = ["whisper-cli", "ffmpeg", "yt-dlp"];
+const APPLE_INTELLIGENCE_BRIDGE_NAME: &str = "libmurmur_apple_intelligence.dylib";
 
 fn target_file_name(tool: &str, target: &str) -> String {
     if target.contains("windows") {
@@ -62,10 +64,35 @@ fn ensure_debug_sidecars() -> Result<(), String> {
     Ok(())
 }
 
-fn apple_intelligence_bridge_path(manifest_dir: &str) -> std::path::PathBuf {
-    Path::new(manifest_dir)
-        .join("binaries")
-        .join("libmurmur_apple_intelligence.dylib")
+fn apple_intelligence_bridge_path(manifest_dir: &str, profile: &str) -> Result<std::path::PathBuf, String> {
+    if profile == "debug" {
+        let out_dir = env::var("OUT_DIR").map_err(|error| format!("missing OUT_DIR env var: {error}"))?;
+        return Ok(Path::new(&out_dir).join(APPLE_INTELLIGENCE_BRIDGE_NAME));
+    }
+
+    Ok(Path::new(manifest_dir).join("binaries").join(APPLE_INTELLIGENCE_BRIDGE_NAME))
+}
+
+fn modified_at(path: &Path) -> Result<SystemTime, String> {
+    fs::metadata(path)
+        .map_err(|error| format!("failed to read metadata for {}: {error}", path.display()))?
+        .modified()
+        .map_err(|error| format!("failed to read modification time for {}: {error}", path.display()))
+}
+
+fn should_rebuild(output_path: &Path, inputs: &[&Path]) -> Result<bool, String> {
+    if !output_path.is_file() {
+        return Ok(true);
+    }
+
+    let output_modified = modified_at(output_path)?;
+    for input in inputs {
+        if modified_at(input)? > output_modified {
+            return Ok(true);
+        }
+    }
+
+    Ok(false)
 }
 
 fn ensure_apple_intelligence_bridge() -> Result<(), String> {
@@ -76,25 +103,39 @@ fn ensure_apple_intelligence_bridge() -> Result<(), String> {
 
     let manifest_dir =
         env::var("CARGO_MANIFEST_DIR").map_err(|error| format!("missing CARGO_MANIFEST_DIR env var: {error}"))?;
+    let profile = env::var("PROFILE").unwrap_or_default();
     let source_path = Path::new(&manifest_dir)
         .join("native")
         .join("apple_intelligence_bridge.swift");
-    let binaries_dir = Path::new(&manifest_dir).join("binaries");
-    let output_path = apple_intelligence_bridge_path(&manifest_dir);
-    let module_cache_path = Path::new(&manifest_dir).join("target").join("swift-module-cache");
+    let build_script_path = Path::new(&manifest_dir).join("build.rs");
+    let output_path = apple_intelligence_bridge_path(&manifest_dir, &profile)?;
+    let module_cache_path = Path::new(
+        &env::var("OUT_DIR").map_err(|error| format!("missing OUT_DIR env var: {error}"))?,
+    )
+    .join("swift-module-cache");
 
-    fs::create_dir_all(&binaries_dir).map_err(|error| {
-        format!(
-            "failed to create bridge output directory {}: {error}",
-            binaries_dir.display()
-        )
-    })?;
+    if let Some(parent) = output_path.parent() {
+        fs::create_dir_all(parent).map_err(|error| {
+            format!(
+                "failed to create bridge output directory {}: {error}",
+                parent.display()
+            )
+        })?;
+    }
     fs::create_dir_all(&module_cache_path).map_err(|error| {
         format!(
             "failed to create Swift module cache directory {}: {error}",
             module_cache_path.display()
         )
     })?;
+
+    if !should_rebuild(&output_path, &[source_path.as_path(), build_script_path.as_path()])? {
+        println!(
+            "cargo:rustc-env=MURMUR_APPLE_INTELLIGENCE_BRIDGE_PATH={}",
+            output_path.display()
+        );
+        return Ok(());
+    }
 
     let sdk_output = std::process::Command::new("xcrun")
         .args(["--show-sdk-path", "--sdk", "macosx"])
