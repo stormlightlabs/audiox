@@ -315,20 +315,6 @@ fn collect_whisper_model_inventory(
     )
 }
 
-fn fallback_summary(transcript: &str) -> Option<String> {
-    let cleaned = transcript.split_whitespace().collect::<Vec<_>>().join(" ");
-    if cleaned.is_empty() {
-        return None;
-    }
-
-    let char_count = cleaned.chars().count();
-    if char_count <= 240 {
-        return Some(cleaned);
-    }
-
-    Some(format!("{}...", cleaned.chars().take(237).collect::<String>()))
-}
-
 /// TODO: embed this with [include_str!] or [include_bytes!]
 fn metadata_prompt(transcript: &str) -> String {
     let clipped_transcript = transcript.chars().take(16_000).collect::<String>();
@@ -642,6 +628,20 @@ fn managed_paths(app: &tauri::AppHandle) -> (std::path::PathBuf, std::path::Path
     (state.app_data_dir().to_path_buf(), state.database_path().to_path_buf())
 }
 
+#[tauri::command]
+#[allow(clippy::needless_pass_by_value)]
+pub fn resolve_document_storage_path(app: tauri::AppHandle, path: String) -> Result<String, String> {
+    let stored_path = path.trim();
+    if stored_path.is_empty() {
+        return Err("path must not be empty".to_string());
+    }
+
+    let (app_data_dir, _) = managed_paths(&app);
+    Ok(storage::resolve_storage_path(&app_data_dir, stored_path)
+        .display()
+        .to_string())
+}
+
 fn apply_document_sort(documents: &mut [models::DocumentSummary], sort: models::DocumentSort) {
     match sort {
         models::DocumentSort::CreatedDesc => {
@@ -836,14 +836,31 @@ async fn process_document_ai(
 ) -> Result<(String, Option<String>, Vec<String>, Vec<models::EmbeddedChunk>), String> {
     emit_metadata_progress(app, progress_event, "running", "Starting metadata enrichment...", 5.0);
 
-    let (generated, metadata_backend_label) =
-        generate_metadata_for_backend(app, transcript, fallback_title, progress_event, runtime_settings).await?;
+    let (generated, metadata_backend_label, metadata_warning) =
+        match generate_metadata_for_backend(app, transcript, fallback_title, progress_event, runtime_settings).await {
+            Ok((generated, metadata_backend_label)) => (generated, metadata_backend_label, None),
+            Err(error) => {
+                log::warn!("metadata generation failed; continuing without summary: {error}");
+                emit_metadata_progress(
+                    app,
+                    progress_event,
+                    "running",
+                    "Metadata generation failed. Continuing with embeddings only...",
+                    62.0,
+                );
+                (
+                    GeneratedMetadata::default(),
+                    "fallback metadata".to_string(),
+                    Some(error),
+                )
+            }
+        };
 
     let title = generated
         .title
         .filter(|item| !item.trim().is_empty())
         .unwrap_or_else(|| fallback_title.to_string());
-    let summary = generated.summary.or_else(|| fallback_summary(transcript));
+    let summary = generated.summary.filter(|item| !item.trim().is_empty());
     let tags = generated.tags;
 
     emit_metadata_progress(
@@ -887,7 +904,10 @@ async fn process_document_ai(
         app,
         progress_event,
         "completed",
-        format!("Metadata enrichment complete with {metadata_backend_label}. Embeddings ready."),
+        metadata_warning.map_or_else(
+            || format!("Metadata enrichment complete with {metadata_backend_label}. Embeddings ready."),
+            |_| "Metadata enrichment completed with embeddings only. Summary was skipped.".to_string(),
+        ),
         100.0,
     );
 

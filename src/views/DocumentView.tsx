@@ -7,6 +7,7 @@ import { A, useParams, useSearchParams } from "@solidjs/router";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import * as logger from "@tauri-apps/plugin-log";
+import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { createEffect, createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import { DocumentSegments } from "./DocumentView/DocumentSegments";
 import { segmentDomKey, TranscriptSegment } from "./DocumentView/lib";
@@ -105,6 +106,32 @@ function isMarkdownSource(document: DocumentDetail): boolean {
   return document.sourceUri.trim().toLowerCase().endsWith(".md");
 }
 
+type FileMetadataLinkProps = {
+  label: string;
+  storedPath: string | null;
+  onReveal: (storedPath: string) => Promise<void>;
+};
+
+function FileMetadataLink(props: FileMetadataLinkProps) {
+  const trimmedPath = () => props.storedPath?.trim() ?? "";
+
+  return (
+    <p class="mt-1 text-xs text-subtext first:mt-0">
+      <span class="font-medium text-text">{props.label}:</span>{" "}
+      <Show when={trimmedPath()} fallback={<span>N/A</span>}>
+        {(path) => (
+          <button
+            type="button"
+            class="truncate text-left text-accent underline decoration-accent/50 underline-offset-2 transition hover:text-text"
+            onClick={() => void props.onReveal(path())}>
+            {path()}
+          </button>
+        )}
+      </Show>
+    </p>
+  );
+}
+
 export function DocumentView() {
   const params = useParams<{ id?: string }>();
   const [searchParams] = useSearchParams<{ segment?: string; q?: string }>();
@@ -119,6 +146,7 @@ export function DocumentView() {
   const [isEnriching, setIsEnriching] = createSignal(false);
   const [enrichmentProgress, setEnrichmentProgress] = createSignal<MetadataProgress | null>(null);
   const [enrichmentError, setEnrichmentError] = createSignal<string | null>(null);
+  const [assetRevealError, setAssetRevealError] = createSignal<string | null>(null);
   const [focusedSegmentKey, setFocusedSegmentKey] = createSignal<string | null>(null);
 
   const segmentElements = new Map<string, HTMLDivElement>();
@@ -143,6 +171,7 @@ export function DocumentView() {
       setSaveError(null);
       setEnrichmentProgress(null);
       setEnrichmentError(null);
+      setAssetRevealError(null);
       setIsEnriching(false);
       try {
         const result = await invoke<DocumentDetail>("get_document", { id });
@@ -170,6 +199,7 @@ export function DocumentView() {
     setDraftTitle(currentDocument.title);
     setDraftTags(tagsInput(currentDocument.tags));
     setSaveError(null);
+    setAssetRevealError(null);
   });
 
   createEffect(() => {
@@ -306,6 +336,19 @@ export function DocumentView() {
       setEnrichmentError(normalizeError(enrichmentFailure));
     } finally {
       setIsEnriching(false);
+    }
+  };
+
+  const revealStoredPath = async (storedPath: string) => {
+    try {
+      setAssetRevealError(null);
+      const resolvedPath = await invoke<string>("resolve_document_storage_path", { path: storedPath });
+      await revealItemInDir(resolvedPath);
+    } catch (revealError) {
+      logger.warn("Failed to reveal document asset in its containing directory.", {
+        keyValues: { error: normalizeError(revealError), storedPath },
+      });
+      setAssetRevealError(`Could not open containing folder for ${storedPath}.`);
     }
   };
 
@@ -470,9 +513,27 @@ export function DocumentView() {
 
               <Show when={!isTextSource(currentDocument().sourceType)}>
                 <article class="rounded-2xl border border-overlay bg-surface/35 p-4">
-                  <p class="text-xs text-subtext">Audio path: {currentDocument().audioPath ?? "N/A"}</p>
-                  <p class="mt-1 text-xs text-subtext">SRT: {currentDocument().subtitleSrtPath ?? "N/A"}</p>
-                  <p class="mt-1 text-xs text-subtext">VTT: {currentDocument().subtitleVttPath ?? "N/A"}</p>
+                  <FileMetadataLink
+                    label="Audio path"
+                    storedPath={currentDocument().audioPath}
+                    onReveal={revealStoredPath} />
+                  <FileMetadataLink
+                    label="SRT"
+                    storedPath={currentDocument().subtitleSrtPath}
+                    onReveal={revealStoredPath} />
+                  <FileMetadataLink
+                    label="VTT"
+                    storedPath={currentDocument().subtitleVttPath}
+                    onReveal={revealStoredPath} />
+                  <Show when={assetRevealError()}>
+                    {(message) => (
+                      <p
+                        role="alert"
+                        class="mt-3 rounded-xl border border-accent/50 bg-accent/10 p-3 text-sm text-text">
+                        {message()}
+                      </p>
+                    )}
+                  </Show>
                   <p class="mt-1 text-xs text-subtext">Updated: {formatDate(currentDocument().updatedAt)}</p>
                 </article>
               </Show>

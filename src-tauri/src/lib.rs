@@ -69,6 +69,7 @@ pub fn run() {
             markdown::list_markdown_themes,
             markdown::render_markdown,
             commands::get_document,
+            commands::resolve_document_storage_path,
             commands::update_document,
             commands::enrich_document_metadata,
             commands::delete_document,
